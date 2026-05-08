@@ -3,7 +3,8 @@ param(
     [string]$ConfigPath = 'config/offline-package.json',
     [switch]$SkipInstaller,
     [switch]$RequireInstaller,
-    [string]$MetadataOutputPath = ''
+    [string]$MetadataOutputPath = '',
+    [string]$WorkRoot = ''
 )
 
 Set-StrictMode -Version Latest
@@ -151,7 +152,11 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $configFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $ConfigPath
 $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
 
-$workRoot = Join-Path $repoRoot 'build/work'
+$workRoot = if ($WorkRoot) {
+    [System.IO.Path]::GetFullPath($WorkRoot)
+} else {
+    Join-Path $repoRoot 'build/work'
+}
 $outputRoot = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $config.packaging.outputDir
 $sourceExportRoot = Join-Path $workRoot 'source-app'
 $stageRoot = Join-Path $workRoot 'stage'
