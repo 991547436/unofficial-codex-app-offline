@@ -217,7 +217,13 @@ jobs:
             '-ConfigPath',
             'config/offline-package.json',
             '-MetadataOutputPath',
-            'build-metadata.json'
+            'build-metadata.json',
+            '-WorkRoot',
+            # Use a short absolute path so Inno Setup can compress files with deeply-nested
+            # node_modules paths. The staging path under the GitHub Actions workspace root
+            # (D:\a\<repo>\<repo>\build\work\stage\...) reaches 260+ characters, which exceeds
+            # the Windows MAX_PATH limit that Inno Setup's file I/O uses.
+            'D:\cb'
           )
 
           if ('${{ github.event_name }}' -eq 'workflow_dispatch' -and '${{ inputs.build_installer }}' -eq 'false') {
