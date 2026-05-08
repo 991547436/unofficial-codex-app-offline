@@ -175,6 +175,15 @@ jobs:
           $global:LASTEXITCODE = 0
           exit 0
 
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          $applied = (Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled") -eq 1
+          if (-not $applied) { throw "Failed to enable Windows long path support." }
+          git config --system core.longpaths true
+          Write-Host "Windows long path support enabled."
+
       - name: Ensure Inno Setup
         if: ${{ steps.release_check.outputs.skip_build != 'true' && (github.event_name != 'workflow_dispatch' || inputs.build_installer) }}
         shell: pwsh
