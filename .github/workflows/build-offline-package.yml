@@ -21,6 +21,7 @@ on:
     paths:
       - '.github/workflows/build-offline-package.yml'
       - '.github/workflows/build-offline-package-monitor.yml'
+      - 'README.md'
       - 'config/**'
       - 'installer/**'
       - 'package.json'
@@ -33,6 +34,7 @@ on:
     paths:
       - '.github/workflows/build-offline-package.yml'
       - '.github/workflows/build-offline-package-monitor.yml'
+      - 'README.md'
       - 'config/**'
       - 'installer/**'
       - 'package.json'
