@@ -142,9 +142,7 @@ try {
     }
 
     if (Test-Path $curatedRoot) {
-        Get-ChildItem -Path $curatedRoot -Directory -Force | ForEach-Object {
-            Copy-Item -Path $_.FullName -Destination (Join-Path $destinationRoot $_.Name) -Recurse -Force
-        }
+        Copy-Item -Path $curatedRoot -Destination (Join-Path $destinationRoot '.curated') -Recurse -Force
     }
 
     $metadata = [ordered]@{

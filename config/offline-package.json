@@ -12,6 +12,11 @@
     "sources": [
       "build/work/skills-official"
     ],
+    "defaultInstallProfile": "offline",
+    "defaultInstallPaths": [
+      ".system/plugin-creator",
+      ".system/skill-creator"
+    ],
     "official": {
       "owner": "openai",
       "repo": "skills",

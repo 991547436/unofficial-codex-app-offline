@@ -3,7 +3,9 @@ param(
     [string]$InstallRoot = '',
     [string]$CodexHome = '',
     [switch]$NoLaunch,
-    [switch]$SkipSkillSync
+    [switch]$SkipSkillSync,
+    [string]$SkillProfile = '',
+    [switch]$AssumeYes
 )
 
 Set-StrictMode -Version Latest
@@ -52,19 +54,242 @@ function Import-EnvFile {
     }
 }
 
+function Get-ContentHash {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        return ([System.BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
+    }
+}
+
+function Get-RelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$PathValue
+    )
+
+    $resolvedBasePath = [System.IO.Path]::GetFullPath($BasePath)
+    $resolvedTargetPath = [System.IO.Path]::GetFullPath($PathValue)
+    $baseRoot = [System.IO.Path]::GetPathRoot($resolvedBasePath)
+    $targetRoot = [System.IO.Path]::GetPathRoot($resolvedTargetPath)
+
+    if (-not [string]::Equals($baseRoot, $targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedTargetPath.Replace('\\', '/').Replace('\', '/')
+    }
+
+    if ($resolvedBasePath -eq $resolvedTargetPath) {
+        return '.'
+    }
+
+    if (-not $resolvedBasePath.EndsWith([string][System.IO.Path]::DirectorySeparatorChar) -and
+        -not $resolvedBasePath.EndsWith([string][System.IO.Path]::AltDirectorySeparatorChar)) {
+        $resolvedBasePath += [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    $baseUri = [System.Uri]$resolvedBasePath
+    $targetUri = [System.Uri]$resolvedTargetPath
+    $relativePath = [System.Uri]::UnescapeDataString(
+        $baseUri.MakeRelativeUri($targetUri).ToString()
+    ).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+
+    return $relativePath.Replace('\\', '/').Replace('\', '/')
+}
+
+function Get-DirectoryHash {
+    param([Parameter(Mandatory = $true)][string]$DirectoryPath)
+
+    $material = (Get-ChildItem -Path $DirectoryPath -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
+        $relativePath = Get-RelativePath -BasePath $DirectoryPath -PathValue $_.FullName
+        $hash = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash.ToLowerInvariant()
+        '{0}:{1}' -f $relativePath, $hash
+    }) -join "`n"
+
+    return Get-ContentHash -Value $material
+}
+
+function Get-ObjectProperty {
+    param(
+        [Parameter(Mandatory = $true)]$ObjectValue,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $property = $ObjectValue.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Join-SafeRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath)) {
+        throw "Unsafe skill manifest path: $RelativePath"
+    }
+
+    $parts = $RelativePath.Replace('\', '/').Split('/') | Where-Object { $_ -ne '' }
+    if ($parts | Where-Object { $_ -eq '.' -or $_ -eq '..' }) {
+        throw "Unsafe skill manifest path: $RelativePath"
+    }
+
+    $targetPath = $BasePath
+    foreach ($part in $parts) {
+        $targetPath = Join-Path $targetPath $part
+    }
+
+    $resolvedBasePath = [System.IO.Path]::GetFullPath($BasePath)
+    $resolvedTargetPath = [System.IO.Path]::GetFullPath($targetPath)
+    if (-not $resolvedBasePath.EndsWith([string][System.IO.Path]::DirectorySeparatorChar)) {
+        $resolvedBasePath += [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    if (-not $resolvedTargetPath.StartsWith($resolvedBasePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Skill manifest path escapes the target directory: $RelativePath"
+    }
+
+    return $resolvedTargetPath
+}
+
+function Remove-PreviouslyManagedSkills {
+    param(
+        $PreviousManifest,
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [string[]]$KeepRelativePaths = @()
+    )
+
+    if ($null -eq $PreviousManifest) { return }
+    $previousSkills = Get-ObjectProperty -ObjectValue $PreviousManifest -Name 'skills'
+    if ($null -eq $previousSkills) { return }
+
+    $keepSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativePath in $KeepRelativePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($relativePath)) {
+            $keepSet.Add($relativePath.Replace('\', '/')) | Out-Null
+        }
+    }
+
+    foreach ($skill in @($previousSkills)) {
+        $relativePath = [string](Get-ObjectProperty -ObjectValue $skill -Name 'relativePath')
+        $skillHash = [string](Get-ObjectProperty -ObjectValue $skill -Name 'skillHash')
+
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or [string]::IsNullOrWhiteSpace($skillHash)) { continue }
+        if ($keepSet.Contains($relativePath.Replace('\', '/'))) { continue }
+
+        $targetPath = Join-SafeRelativePath -BasePath $TargetRoot -RelativePath $relativePath
+        if (-not (Test-Path -LiteralPath $targetPath -PathType Container)) { continue }
+        if ((Get-DirectoryHash -DirectoryPath $targetPath) -ne $skillHash) { continue }
+
+        Remove-Item -LiteralPath $targetPath -Recurse -Force
+    }
+}
+
+function Select-ManifestProfile {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [string]$RequestedProfile
+    )
+
+    $defaultProfile = [string](Get-ObjectProperty -ObjectValue $Manifest -Name 'defaultInstallProfile')
+    $profileName = if (-not [string]::IsNullOrWhiteSpace($RequestedProfile)) {
+        $RequestedProfile
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($defaultProfile)) {
+        $defaultProfile
+    }
+    else {
+        'all'
+    }
+
+    $selectedSkills = if ([string]::Equals($profileName, 'all', [System.StringComparison]::OrdinalIgnoreCase)) {
+        @($Manifest.skills)
+    }
+    else {
+        @($Manifest.skills | Where-Object {
+            $installProfiles = @($_.installProfiles | ForEach-Object { [string]$_ })
+            ($installProfiles -contains $profileName) -or
+                ($_.installByDefault -and [string]::Equals($profileName, $defaultProfile, [System.StringComparison]::OrdinalIgnoreCase))
+        })
+    }
+
+    if ($selectedSkills.Count -eq 0 -and -not [string]::Equals($profileName, 'all', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Skill profile '$profileName' does not contain any bundled skills."
+    }
+
+    $profileHashes = Get-ObjectProperty -ObjectValue $Manifest -Name 'profileHashes'
+    $profileHash = $null
+    if ($null -ne $profileHashes) {
+        $profileHashProperty = $profileHashes.PSObject.Properties[$profileName]
+        if ($null -ne $profileHashProperty) {
+            $profileHash = [string]$profileHashProperty.Value
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($profileHash)) {
+        $hashMaterial = ($selectedSkills | Sort-Object relativePath | ForEach-Object {
+            '{0}:{1}' -f $_.relativePath, $_.skillHash
+        }) -join "`n"
+        $profileHash = Get-ContentHash -Value $hashMaterial
+    }
+
+    return [pscustomobject]([ordered]@{
+        packageVersion = $Manifest.packageVersion
+        generatedAt = $Manifest.generatedAt
+        contentHash = $profileHash
+        sourceContentHash = $Manifest.contentHash
+        installProfile = $profileName
+        defaultInstallProfile = $defaultProfile
+        skills = $selectedSkills
+    })
+}
+
+function Copy-ManifestSkills {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$SeedRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRoot
+    )
+
+    foreach ($skill in @($Manifest.skills)) {
+        $relativePath = [string]$skill.relativePath
+        $sourcePath = Join-SafeRelativePath -BasePath $SeedRoot -RelativePath $relativePath
+        $targetPath = Join-SafeRelativePath -BasePath $TargetRoot -RelativePath $relativePath
+
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+            throw "Bundled skill listed in manifest was not found: $relativePath"
+        }
+
+        New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+        Get-ChildItem -LiteralPath $sourcePath -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Recurse -Force
+        }
+    }
+}
+
 function Confirm-BundledSkillsSync {
     param(
         [Parameter(Mandatory = $true)]
         [string]$TargetPath,
-        [switch]$NoLaunch
+        [string]$ProfileName,
+        [int]$SkillCount,
+        [switch]$NoLaunch,
+        [switch]$AssumeYes
     )
 
-    $details = "This copies the bundled official skills into your local Codex skills directory. They will appear in the Skills page as installed and can be used as needed."
+    if ($AssumeYes) { return $true }
+
+    $details = "This copies the bundled '$ProfileName' skill profile ($SkillCount skill(s)) into your local Codex skills directory. Extra bundled skills stay inside the package and can be synced later from _internal\tools if needed."
     $message = if ($NoLaunch) {
-        "Codex Offline is about to sync bundled official skills to:`n$TargetPath`n`n$details`n`nDo you want to continue?"
+        "Codex Offline is about to sync bundled skills to:`n$TargetPath`n`n$details`n`nDo you want to continue?"
     }
     else {
-        "Codex Offline needs to sync bundled official skills to:`n$TargetPath`n`nbefore launch.`n`n$details`n`nDo you want to continue?"
+        "Codex Offline needs to sync bundled skills to:`n$TargetPath`n`nbefore launch.`n`n$details`n`nDo you want to continue?"
     }
 
     try {
@@ -111,6 +336,8 @@ $stateRoot = Join-Path $resolvedCodexHome '.offline-package'
 $statePath = Join-Path $stateRoot 'skills-manifest.json'
 $targetSkillsRoot = Join-Path $resolvedCodexHome 'skills'
 $launcherPath = Join-Path $resolvedInstallRoot 'app/Codex.exe'
+$currentState = $null
+$manifestToSync = $null
 
 if (-not (Test-Path $launcherPath)) {
     throw "Codex executable was not found: $launcherPath"
@@ -130,19 +357,23 @@ else {
     }
 
     $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+    $manifestToSync = Select-ManifestProfile -Manifest $manifest -RequestedProfile $SkillProfile
     $needSync = $true
 
     if (Test-Path $statePath) {
         $currentState = Get-Content -Path $statePath -Raw | ConvertFrom-Json
 
-        if ($currentState.contentHash -eq $manifest.contentHash) {
+        if (
+            $currentState.contentHash -eq $manifestToSync.contentHash -and
+            [string](Get-ObjectProperty -ObjectValue $currentState -Name 'installProfile') -eq [string]$manifestToSync.installProfile
+        ) {
             $needSync = $false
         }
     }
 }
 
 if ($needSync) {
-    if (-not (Confirm-BundledSkillsSync -TargetPath $targetSkillsRoot -NoLaunch:$NoLaunch)) {
+    if (-not (Confirm-BundledSkillsSync -TargetPath $targetSkillsRoot -ProfileName $manifestToSync.installProfile -SkillCount @($manifestToSync.skills).Count -NoLaunch:$NoLaunch -AssumeYes:$AssumeYes)) {
         if ($NoLaunch) {
             Write-Warning 'Skill sync canceled by user.'
         }
@@ -155,22 +386,29 @@ if ($needSync) {
     Write-Host 'Syncing bundled skills...' -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path $targetSkillsRoot | Out-Null
 
-    foreach ($skillDirectory in (Get-ChildItem -Path $seedRoot -Directory -Force | Sort-Object Name)) {
-        $targetPath = Join-Path $targetSkillsRoot $skillDirectory.Name
-        New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
-        Copy-Item -Path (Join-Path $skillDirectory.FullName '*') -Destination $targetPath -Recurse -Force
-    }
+    $selectedRelativePaths = @($manifestToSync.skills | ForEach-Object { [string]$_.relativePath })
+    Remove-PreviouslyManagedSkills -PreviousManifest $currentState -TargetRoot $targetSkillsRoot -KeepRelativePaths $selectedRelativePaths
+    Copy-ManifestSkills -Manifest $manifestToSync -SeedRoot $seedRoot -TargetRoot $targetSkillsRoot
 
     New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $statePath -Encoding UTF8
-    Write-Host 'Skills synced.' -ForegroundColor Green
+    $manifestToSync | ConvertTo-Json -Depth 6 | Set-Content -Path $statePath -Encoding UTF8
+    Write-Host "Skills synced ($($manifestToSync.installProfile): $(@($manifestToSync.skills).Count))." -ForegroundColor Green
 } else {
-    Write-Host 'Skills up to date.' -ForegroundColor Green
+    if ($null -ne $manifestToSync) {
+        Write-Host "Skills up to date ($($manifestToSync.installProfile))." -ForegroundColor Green
+    }
 }
 
 if ($NoLaunch) {
     Write-Output "Skills ready in $targetSkillsRoot"
     return
+}
+
+# Codex 26.506+ keeps Windows Computer Use behind an Electron process env gate.
+# Set the offline default here so all provided launchers inherit it, while still
+# allowing advanced users to override it before invoking this script.
+if (-not [System.Environment]::GetEnvironmentVariable('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+    [System.Environment]::SetEnvironmentVariable('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE', '1', 'Process')
 }
 
 Write-Host 'Launching Codex...' -ForegroundColor Cyan

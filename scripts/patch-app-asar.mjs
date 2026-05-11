@@ -11,7 +11,9 @@
  * 1. process.windowsStore = true
  *    Electron exposes this flag only inside MSIX containers.  Codex checks it
  *    for telemetry and build-type reporting.  We inject it at the top of the
- *    main-process entry point.
+ *    main-process entry point.  The same bootstrap patch also defaults the
+ *    Windows Computer Use process environment gate so direct Codex.exe
+ *    launches get the same runtime features as the provided launchers.
  *
  * 2. Implement "show-settings" and "open-config-toml" IPC handlers
  *    The Electron build throws "not implemented" for these messages.  We
@@ -61,12 +63,23 @@
  *
  * 35. Enable Fast mode speed selector for offline builds
  *    The "Fast / Standard" speed selector button in the model picker is
- *    gated behind two run-time conditions inside the settings chunk:
- *    (1) statsig_default_enable_features.fast_mode === true (dynamic
- *    config that defaults to off when Statsig is unreachable) and
- *    (2) authMethod === "chatgpt".  We replace the compound gate
- *    expression `X?.fast_mode===!0&&authCheck(arg)` with !0 so the
- *    button is always visible in offline builds.
+ *    gated by build-version-specific availability checks.  Older builds
+ *    used a Statsig fast_mode check; newer builds hide the selector when
+ *    the model list does not advertise the "fast" speed tier.  We keep the
+ *    selector visible so users can switch back to Standard after selecting
+ *    Fast.
+ *
+ * 36. Keep bundled browser plugins in the runtime marketplace
+ *    Newer builds materialize only plugins whose feature availability checks
+ *    are true. In offline/API mode browser feature flags can be false even
+ *    though the browser-use and chrome plugins are bundled. We keep those
+ *    descriptors available so @chrome is not removed at startup.
+ *
+ * 37. Enable external Chrome plugin mentions for offline builds
+ *    The composer filters @chrome through the renderer-side
+ *    browser_use_external availability check. In offline/API mode the online
+ *    gate can be false even after the bundled Chrome plugin and native host
+ *    are installed, so we bypass that renderer gate.
  *
  * 8. Normalize Windows automation cwd paths
  *    The packaged Automations UI can persist selected project paths in
@@ -146,6 +159,10 @@ function resolveMainEntry(extractDir) {
 }
 
 const PATCH_MARKER = '/* codex-offline:windowsStore-patch */';
+const COMPUTER_USE_ENV_DEFAULT =
+  'if(process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE==null){' +
+    'process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE="1"' +
+  '}\n';
 // Suppress EPIPE errors on stdout/stderr that surface as uncaught
 // exceptions when the Electron app writes to a console pipe that has
 // already been closed (e.g. the CMD window that launched Codex exits
@@ -159,7 +176,7 @@ const EPIPE_GUARD =
     '}' +
   '}' +
   '_epipeGuard(process.stdout);_epipeGuard(process.stderr);\n';
-const PATCH_SNIPPET = `${PATCH_MARKER}\nif(!process.windowsStore){process.windowsStore=true;}\n${EPIPE_GUARD}`;
+const PATCH_SNIPPET = `${PATCH_MARKER}\nif(!process.windowsStore){process.windowsStore=true;}\n${COMPUTER_USE_ENV_DEFAULT}${EPIPE_GUARD}`;
 
 /** Return true if the file already contains our patch marker. */
 function isAlreadyPatched(filePath) {
@@ -171,6 +188,23 @@ function isAlreadyPatched(filePath) {
 function patchFile(filePath) {
   const original = fs.readFileSync(filePath, 'utf8');
   fs.writeFileSync(filePath, PATCH_SNIPPET + original, 'utf8');
+}
+
+function refreshMainEntryPatch(filePath) {
+  let content = fs.readFileSync(filePath, 'utf8');
+  if (content.includes('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+    return false;
+  }
+
+  const windowsStoreLine = 'if(!process.windowsStore){process.windowsStore=true;}\n';
+  if (content.includes(windowsStoreLine)) {
+    content = content.replace(windowsStoreLine, windowsStoreLine + COMPUTER_USE_ENV_DEFAULT);
+  } else {
+    content = content.replace(PATCH_MARKER, `${PATCH_MARKER}\n${COMPUTER_USE_ENV_DEFAULT}`);
+  }
+
+  fs.writeFileSync(filePath, content, 'utf8');
+  return true;
 }
 
 function listJavaScriptFiles(dirPath) {
@@ -198,6 +232,59 @@ function matchesPattern(content, pattern) {
   return pattern.test(content);
 }
 
+function patchBundledBrowserPlugins(filePaths, options) {
+  const patchedFiles = [];
+  let seen = false;
+  let alreadyCorrect = false;
+
+  for (const filePath of filePaths) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const originalContent = content;
+    const fileSeen =
+      options.chromeDescriptorRe.test(originalContent) ||
+      options.browserUseDescriptorRe.test(originalContent) ||
+      options.inAppBrowserDescriptorRe.test(originalContent) ||
+      options.chromeDescriptorPatchedRe.test(originalContent) ||
+      options.browserUseDescriptorPatchedRe.test(originalContent) ||
+      options.inAppBrowserDescriptorPatchedRe.test(originalContent);
+    seen ||= fileSeen;
+
+    if (!fileSeen) continue;
+
+    if (originalContent.includes(options.patchMarker)) {
+      alreadyCorrect = true;
+    }
+
+    if (options.chromeDescriptorRe.test(content)) {
+      content = content.replace(
+        options.chromeDescriptorRe,
+        `{installWhenMissing:!0,$2${options.patchMarker}!0$6`,
+      );
+    }
+
+    if (options.browserUseDescriptorRe.test(content)) {
+      content = content.replace(
+        options.browserUseDescriptorRe,
+        `{autoInstallOptOutKey:$2.Nn($2.Dn),installWhenMissing:!0,name:$2.Dn,isAvailable:({features:$3})=>${options.patchMarker}!0$5`,
+      );
+    }
+
+    if (options.inAppBrowserDescriptorRe.test(content)) {
+      content = content.replace(
+        options.inAppBrowserDescriptorRe,
+        `{installWhenMissing:!0,name:$2.On,isAvailable:({buildFlavor:$3,features:$4})=>${options.patchMarker}!0$6`,
+      );
+    }
+
+    if (content !== originalContent) {
+      fs.writeFileSync(filePath, content, 'utf8');
+      patchedFiles.push(filePath);
+    }
+  }
+
+  return { patchedFiles, seen, alreadyCorrect };
+}
+
 function countOccurrences(content, needle) {
   if (!needle) return 0;
 
@@ -209,6 +296,374 @@ function countOccurrences(content, needle) {
     count += 1;
     start = index + needle.length;
   }
+}
+
+function patchChromePluginScripts(rootAppDir) {
+  const chromePluginRoot = path.join(
+    rootAppDir,
+    'resources',
+    'plugins',
+    'openai-bundled',
+    'plugins',
+    'chrome',
+  );
+  if (!fs.existsSync(chromePluginRoot)) {
+    warn('Bundled Chrome plugin was not found. Chrome plugin script patches skipped.');
+    return;
+  }
+
+  patchChromeBrowserClient(path.join(chromePluginRoot, 'scripts', 'browser-client.mjs'));
+  patchChromeNativeHostCheck(path.join(chromePluginRoot, 'scripts', 'check-native-host-manifest.js'));
+  patchChromeSkillInstructions(path.join(chromePluginRoot, 'skills', 'chrome', 'SKILL.md'));
+
+  return crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(path.join(chromePluginRoot, 'scripts', 'browser-client.mjs')))
+    .digest('hex');
+}
+
+function patchChromeBrowserClient(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Chrome browser client was not found: ${filePath}`);
+  }
+
+  let content = fs.readFileSync(filePath, 'utf8');
+  let changed = false;
+  const discoveryTimeoutPatchMarker = '/*codex-offline:browser-use-discovery-timeout*/';
+  if (content.includes(discoveryTimeoutPatchMarker)) {
+    log('Chrome browser client discovery timeout already patched.');
+  } else {
+    const needle =
+      'async function _O(t,e){let r=null,n="pipe-connect";try{' +
+      'let o=await kc.create(t);r=e(o),n="backend-info-request";' +
+      'let i=await r.getInfo(),s=await LS(i).catch(a=>(ee(a),i));' +
+      'return{browser:{id:crypto.randomUUID().substring(8),api:r,info:xO(s)}}}' +
+      'catch(o){return await r?.close(),ee(o),{failure:`${n}/${jS(o)}`}}}';
+    const helper =
+      `var _codexOfflineBrowserUseDiscoveryTimeout=(t,e,r=8e3)=>new Promise((n,o)=>{` +
+      `let i=setTimeout(()=>o(new Error(\`${'${e}'} timed out after ${'${r}'}ms\`)),r);` +
+      `Promise.resolve(t).then(s=>{clearTimeout(i),n(s)},s=>{clearTimeout(i),o(s)})});` +
+      discoveryTimeoutPatchMarker;
+    const replacement =
+      helper +
+      'async function _O(t,e){let r=null,n="pipe-connect";try{' +
+      'let o=await _codexOfflineBrowserUseDiscoveryTimeout(kc.create(t),"pipe-connect");' +
+      'r=e(o),n="backend-info-request";' +
+      'let i=await _codexOfflineBrowserUseDiscoveryTimeout(r.getInfo(),"backend-info-request"),' +
+      's=await _codexOfflineBrowserUseDiscoveryTimeout(LS(i),"profile-metadata",2e3).catch(a=>(ee(a),i));' +
+      'return{browser:{id:crypto.randomUUID().substring(8),api:r,info:xO(s)}}}' +
+      'catch(o){return await r?.close(),ee(o),{failure:`${n}/${jS(o)}`}}}';
+
+    if (!content.includes(needle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client discovery flow to add pipe timeout.',
+      );
+    }
+
+    content = content.replace(needle, replacement);
+    changed = true;
+    log('Chrome browser client discovery timeout patched.');
+  }
+
+  const profileMetadataTimeoutPatchMarker =
+    '/*codex-offline:browser-use-profile-metadata-timeout*/';
+  if (content.includes(profileMetadataTimeoutPatchMarker)) {
+    log('Chrome browser client profile metadata timeout already patched.');
+  } else {
+    const profileNeedle =
+      's=await LS(i).catch(a=>(ee(a),i));';
+    const profileReplacement =
+      's=await _codexOfflineBrowserUseDiscoveryTimeout(LS(i),"profile-metadata",2e3)' +
+      `.catch(a=>(ee(a),i));${profileMetadataTimeoutPatchMarker}`;
+    if (content.includes(profileNeedle)) {
+      content = content.replace(profileNeedle, profileReplacement);
+      changed = true;
+      log('Chrome browser client profile metadata timeout patched.');
+    } else if (content.includes('"profile-metadata"')) {
+      content = content.replace('"profile-metadata",2e3).catch(a=>(ee(a),i));',
+        `"profile-metadata",2e3).catch(a=>(ee(a),i));${profileMetadataTimeoutPatchMarker}`);
+      changed = true;
+      log('Chrome browser client profile metadata timeout marker added.');
+    } else {
+      throw new Error(
+        'Could not locate Chrome browser-client profile metadata enrichment flow.',
+      );
+    }
+  }
+
+  const nativePipeFallbackPatchMarker =
+    '/*codex-offline:browser-use-native-pipe-fallback*/';
+  const nativePipeDirectPatchMarker =
+    '/*codex-offline:browser-use-native-pipe-direct*/';
+  const nativePipeDirectCreateReplacement =
+    `static async create(e){if(_codexOfflineShouldUseNativePipeFallback(e)){let r=await _codexOfflineCreateNativePipeConnection(e);return new t(r)}let r=Wf();if(r!=null){let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}throw new Error(Vf())}${nativePipeDirectPatchMarker}`;
+  if (content.includes(nativePipeDirectPatchMarker)) {
+    log('Chrome browser client native pipe direct path already patched.');
+  } else if (content.includes(nativePipeFallbackPatchMarker)) {
+    const fallbackFirstCreateNeedle =
+      'static async create(e){let r=Wf();if(r!=null)try{let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}catch(n){if(!_codexOfflineShouldUseNativePipeFallback(e))throw n}if(_codexOfflineShouldUseNativePipeFallback(e)){let n=await _codexOfflineCreateNativePipeConnection(e);return new t(n)}throw new Error(Vf())}';
+    if (!content.includes(fallbackFirstCreateNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client native pipe fallback flow to upgrade.',
+      );
+    }
+
+    content = content.replace(fallbackFirstCreateNeedle, nativePipeDirectCreateReplacement);
+    changed = true;
+    log('Chrome browser client native pipe fallback upgraded to direct Windows path.');
+  } else {
+    const helperNeedle =
+      'function Wf(){let t=import.meta.__codexNativePipe;return t==null||typeof t.createConnection!="function"?null:t}';
+    const helperReplacement =
+      helperNeedle +
+      'function _codexOfflineShouldUseNativePipeFallback(t){return hO()==="win32"&&typeof t=="string"&&t.startsWith("\\\\\\\\.\\\\pipe\\\\codex-browser-use")}' +
+      'function _codexOfflineNativePipeConnectTimeoutMs(){let t=Number(globalThis.nodeRepl?.requestMeta?.["x-codex-native-pipe-connect-timeout-ms"]);return Number.isFinite(t)&&t>0?t:1e3}' +
+      'function _codexOfflineBridgeCreateConnection(t,e){let r=_codexOfflineNativePipeConnectTimeoutMs();return new Promise((n,o)=>{let i=setTimeout(()=>o(new Error(`native pipe bridge timed out after ${r}ms`)),r);Promise.resolve(t.createConnection(e)).then(s=>{clearTimeout(i),n(s)},s=>{clearTimeout(i),o(s)})})}' +
+      'async function _codexOfflineCreateNativePipeConnection(t){let{createConnection:e}=await import("node:net"),r=_codexOfflineNativePipeConnectTimeoutMs();return await new Promise((n,o)=>{let i=e(t),s=!1,a=setTimeout(()=>u(new Error(`native pipe connect timed out after ${r}ms`)),r);function u(c,d){if(s)return;s=!0,clearTimeout(a),i.off("connect",l),i.off("error",u),c?(i.destroy(),o(c)):n(d)}function l(){u(null,i)}i.once("connect",l),i.once("error",u)})}' +
+      nativePipeFallbackPatchMarker;
+    const createNeedle =
+      'static async create(e){let r=Wf();if(r!=null){let n=await r.createConnection(e);return new t(n)}throw new Error(Vf())}';
+
+    if (!content.includes(helperNeedle) || !content.includes(createNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client native pipe transport to add Windows fallback.',
+      );
+    }
+
+    content = content
+      .replace(helperNeedle, helperReplacement)
+      .replace(createNeedle, nativePipeDirectCreateReplacement);
+    changed = true;
+    log('Chrome browser client native pipe direct path patched.');
+  }
+
+  const diagnosticsPatchMarker =
+    '/*codex-offline:browser-use-discovery-diagnostics*/';
+  if (content.includes(diagnosticsPatchMarker)) {
+    log('Chrome browser client discovery diagnostics already patched.');
+  } else {
+    const diagnosticsNeedle =
+      'let e=t,r=new Ac,n=p=>new Rc(p,r,Gr),{browsers:o,diagnostics:i}=await US(n),s=await HO(o),a=s.map(p=>new Tc(p.api,p.id,p.info));';
+    const diagnosticsReplacement =
+      'let e=t,r=new Ac,n=p=>new Rc(p,r,Gr),{browsers:o,diagnostics:i}=await US(n);' +
+      `e.__codexBrowserUseDiagnostics=i;${diagnosticsPatchMarker}` +
+      'let s=await HO(o),a=s.map(p=>new Tc(p.api,p.id,p.info));';
+    if (!content.includes(diagnosticsNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client setup flow to expose discovery diagnostics.',
+      );
+    }
+
+    content = content.replace(diagnosticsNeedle, diagnosticsReplacement);
+    changed = true;
+    log('Chrome browser client discovery diagnostics patched.');
+  }
+
+  const chromePipeFilterPatchMarker =
+    '/*codex-offline:browser-use-chrome-pipe-filter*/';
+  if (content.includes(chromePipeFilterPatchMarker)) {
+    log('Chrome browser client Windows Chrome pipe filter already patched.');
+  } else {
+    const pipeListNeedle =
+      'SO=async()=>{let t="\\\\\\\\.\\\\pipe\\\\";return(await OS(t)).map(n=>BS.resolve(t,n)).filter(n=>n.startsWith(Zf))}';
+    const pipeListReplacement =
+      'SO=async()=>{let t="\\\\\\\\.\\\\pipe\\\\",e=(await OS(t)).map(n=>BS.resolve(t,n)).filter(n=>n.startsWith(Zf)),' +
+      'r=e.filter(n=>n.startsWith(Zf+"\\\\"));return(r.length>0?r:e)}' +
+      chromePipeFilterPatchMarker;
+    if (!content.includes(pipeListNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client Windows pipe listing flow.',
+      );
+    }
+
+    content = content.replace(pipeListNeedle, pipeListReplacement);
+    changed = true;
+    log('Chrome browser client Windows Chrome pipe filter patched.');
+  }
+
+  const directSetupPatchMarker =
+    '/*codex-offline:browser-use-direct-setup*/';
+  if (content.includes(directSetupPatchMarker)) {
+    log('Chrome browser client direct Windows pipe setup already patched.');
+  } else {
+    const directSetupHelperNeedle =
+      'function _codexOfflineShouldUseNativePipeFallback(t){return hO()==="win32"&&typeof t=="string"&&t.startsWith("\\\\\\\\.\\\\pipe\\\\codex-browser-use")}';
+    const directSetupHelperReplacement =
+      directSetupHelperNeedle +
+      'function _codexOfflineCanUseNativePipeDirect(){return hO()==="win32"}';
+    const directSetupGuardNeedle =
+      'async function nae({globals:t}){if(Wf()==null)throw new Error(Vf());';
+    const directSetupGuardReplacement =
+      `async function nae({globals:t}){if(Wf()==null&&!_codexOfflineCanUseNativePipeDirect())throw new Error(Vf());${directSetupPatchMarker}`;
+
+    if (!content.includes(directSetupHelperNeedle) || !content.includes(directSetupGuardNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client setup guard to enable direct Windows pipe setup.',
+      );
+    }
+
+    content = content
+      .replace(directSetupHelperNeedle, directSetupHelperReplacement)
+      .replace(directSetupGuardNeedle, directSetupGuardReplacement);
+    changed = true;
+    log('Chrome browser client direct Windows pipe setup patched.');
+  }
+
+  const requestTimeoutPatchMarker =
+    '/*codex-offline:browser-use-request-timeout*/';
+  if (content.includes(requestTimeoutPatchMarker)) {
+    log('Chrome browser client request timeout already patched.');
+  } else {
+    const requestTimeoutHelperNeedle =
+      'var Vi=class{constructor(e){';
+    const requestTimeoutHelperReplacement =
+      'function _codexOfflineBrowserUseRequestTimeoutMs(t,e){let r=Number(e?.client_timeout_ms??globalThis.nodeRepl?.requestMeta?.["x-codex-browser-use-request-timeout-ms"]);return Number.isFinite(r)&&r>0?r:1e4}' +
+      requestTimeoutPatchMarker +
+      requestTimeoutHelperNeedle;
+    const requestTimeoutNeedle =
+      'sendRequest(e,r){let n=this.nextId++;return new Promise((o,i)=>{this.pendingRequests.set(n,{resolve:o,reject:i});try{this.transport.sendMessage({jsonrpc:"2.0",method:e.toString(),params:r,id:n})}catch(s){this.pendingRequests.delete(n),i(s)}})}';
+    const requestTimeoutReplacement =
+      'sendRequest(e,r){let n=this.nextId++,o=_codexOfflineBrowserUseRequestTimeoutMs(e,r);return new Promise((i,s)=>{let a=setTimeout(()=>{this.pendingRequests.delete(n),s(new Error(`${String(e)} timed out after ${o}ms`))},o);this.pendingRequests.set(n,{resolve:u=>{clearTimeout(a),i(u)},reject:u=>{clearTimeout(a),s(u)}});try{this.transport.sendMessage({jsonrpc:"2.0",method:e.toString(),params:r,id:n})}catch(u){clearTimeout(a),this.pendingRequests.delete(n),s(u)}})}';
+
+    if (!content.includes(requestTimeoutHelperNeedle) || !content.includes(requestTimeoutNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client JSON-RPC request flow to add timeouts.',
+      );
+    }
+
+    content = content
+      .replace(requestTimeoutHelperNeedle, requestTimeoutHelperReplacement)
+      .replace(requestTimeoutNeedle, requestTimeoutReplacement);
+    changed = true;
+    log('Chrome browser client request timeout patched.');
+  }
+
+  const ambientNetworkPatchMarker =
+    '/*codex-offline:browser-use-disable-ambient-network-default*/';
+  if (content.includes(ambientNetworkPatchMarker)) {
+    log('Chrome browser client ambient network default already patched.');
+  } else {
+    const ambientNetworkNeedle =
+      'function Ps(){return globalThis.nodeRepl?.requestMeta?.[V2]===!0}';
+    const ambientNetworkReplacement =
+      `function Ps(){let t=globalThis.nodeRepl?.requestMeta?.[V2];return t===!1?!1:!0}${ambientNetworkPatchMarker}`;
+
+    if (!content.includes(ambientNetworkNeedle)) {
+      throw new Error(
+        'Could not locate Chrome browser-client ambient network guard to default offline.',
+      );
+    }
+
+    content = content.replace(ambientNetworkNeedle, ambientNetworkReplacement);
+    changed = true;
+    log('Chrome browser client ambient network default patched.');
+  }
+
+  if (changed) {
+    fs.writeFileSync(filePath, content, 'utf8');
+  }
+}
+
+function patchChromeNativeHostCheck(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Chrome native host check script was not found: ${filePath}`);
+  }
+
+  let content = fs.readFileSync(filePath, 'utf8');
+  const patchMarker = '/*codex-offline:localized-registry-default*/';
+  if (content.includes(patchMarker)) {
+    log('Chrome native host registry parser already patched.');
+    return;
+  }
+
+  const needle = 'return readRegistryValue(output, "(Default)");';
+  const replacement =
+    `return readRegistryValue(output, "(Default)") ?? ` +
+    `readRegistryDefaultValueFromVeOutput(output);${patchMarker}`;
+  if (!content.includes(needle)) {
+    throw new Error(
+      'Could not locate Chrome native host registry parser return path.',
+    );
+  }
+
+  const insertBefore = 'function getNativeHostManifestLocationProblem';
+  const fallbackFunction =
+    '\nfunction readRegistryDefaultValueFromVeOutput(output) {\n' +
+    '  for (const line of output.split(/\\r?\\n/)) {\n' +
+    '    const match = line.match(/^\\s*.*?\\s+REG_\\w+\\s+(.+?)\\s*$/);\n' +
+    '    if (match) return stripRegistryString(match[1]);\n' +
+    '  }\n' +
+    '\n' +
+    '  return null;\n' +
+    '}\n';
+  if (!content.includes(insertBefore)) {
+    throw new Error(
+      'Could not locate Chrome native host manifest problem helper.',
+    );
+  }
+
+  content = content
+    .replace(needle, replacement)
+    .replace(insertBefore, fallbackFunction + insertBefore);
+  fs.writeFileSync(filePath, content, 'utf8');
+  log('Chrome native host registry parser patched for localized Windows output.');
+}
+
+function patchChromeSkillInstructions(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Chrome skill instructions were not found: ${filePath}`);
+  }
+
+  let content = fs.readFileSync(filePath, 'utf8');
+  const patchMarker = '<!-- codex-offline:trusted-marketplace-browser-client -->';
+  if (content.includes(patchMarker)) {
+    log('Chrome skill trusted marketplace bootstrap already patched.');
+    return;
+  }
+
+  const needle =
+    /The `browser-client` module is the core entry point for browser use, and is available under `scripts\/browser-client\.mjs` in this plugin's root directory\. ALWAYS import it using an absolute path\.\r?\nIMPORTANT: If this path cannot be found, stop and report that this plugin is missing `scripts\/browser-client\.mjs`\. NEVER use the built in `browser-client` library\./;
+  const matched = content.match(needle)?.[0];
+  const replacement =
+    `${matched}\n\n` +
+    `${patchMarker}\n` +
+    'In bundled/offline desktop sessions, the trusted browser-client path is the `openai-bundled` runtime marketplace copy, not the persistent plugin cache. Prefer this root when it exists: `<codex home>/.tmp/bundled-marketplaces/openai-bundled/plugins/chrome`. Resolve `<codex home>` from `process.env.CODEX_HOME` or the user home `.codex` directory, then import `scripts/browser-client.mjs` from that root. Fall back to this skill plugin root only when the runtime marketplace copy does not exist.';
+
+  if (!matched) {
+    throw new Error('Could not locate Chrome skill browser-client bootstrap paragraph.');
+  }
+
+  content = content.replace(needle, replacement);
+  fs.writeFileSync(filePath, content, 'utf8');
+  log('Chrome skill trusted marketplace bootstrap patched.');
+}
+
+function patchTrustedBrowserClientHashes(filePaths, chromeBrowserClientHash) {
+  const patchedFiles = [];
+  let alreadyCorrect = false;
+  const trustedHashesRe =
+    /var ([A-Za-z_$][\w$]*)=\[((?:`[a-f0-9]{64}`)(?:,`[a-f0-9]{64}`)*)\]/;
+
+  for (const filePath of filePaths) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const match = content.match(trustedHashesRe);
+    if (!match) continue;
+
+    const hashes = new Set(Array.from(match[2].matchAll(/`([a-f0-9]{64})`/g), item => item[1]));
+    if (hashes.has(chromeBrowserClientHash)) {
+      alreadyCorrect = true;
+      continue;
+    }
+
+    content = content.replace(
+      match[0],
+      `var ${match[1]}=[${Array.from(hashes).map(hash => `\`${hash}\``).join(',')},\`${chromeBrowserClientHash}\`]`,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    patchedFiles.push(filePath);
+  }
+
+  return { patchedFiles, alreadyCorrect };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -240,11 +695,17 @@ try {
   log(`Main entry: ${path.relative(tmpDir, mainEntry)}`);
 
   if (isAlreadyPatched(mainEntry)) {
-    log('Main entry already patched.');
+    if (refreshMainEntryPatch(mainEntry)) {
+      log('Main entry patch refreshed for direct Codex.exe Computer Use launch.');
+    } else {
+      log('Main entry already patched.');
+    }
   } else {
     patchFile(mainEntry);
     log('windowsStore patch applied.');
   }
+
+  const chromeBrowserClientHash = patchChromePluginScripts(path.resolve(appDir));
 
   // ── Patch 2: implement settings-related IPC handlers ──────────────────
   //
@@ -386,6 +847,25 @@ try {
     'args:[`app-server`,`--analytics-default-enabled`]';
   const APP_SERVER_SANDBOX_OVERRIDE_REPLACEMENT =
     'args:[`-c`,`windows.sandbox=\'unelevated\'`,`app-server`,`--analytics-default-enabled`]';
+  const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER =
+    '/*codex-offline:windows-browser-use-capability*/';
+  const WINDOWS_BROWSER_USE_CAPABILITY_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return\s+\4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/;
+  // ── Patch 36: Keep bundled browser plugins in runtime marketplace ─────
+  const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER =
+    '/*codex-offline:bundled-browser-plugins-no-force-reload*/';
+  const CHROME_DESCRIPTOR_RE =
+    /(\{forceReload:!0,)(?:installWhenMissing:!0,)?(name:lt,isAvailable:\(\{buildFlavor:([A-Za-z_$][\w$]*),features:([A-Za-z_$][\w$]*)\}\)=>)(\4\.externalBrowserUseAllowed&&Yn\(\3\))(\})/;
+  const CHROME_DESCRIPTOR_PATCHED_RE =
+    /\{installWhenMissing:!0,name:lt,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
+  const BROWSER_USE_DESCRIPTOR_RE =
+    /(\{autoInstallOptOutKey:([A-Za-z_$][\w$]*)\.Nn\(\2\.Dn\),forceReload:!0,installWhenMissing:!0,name:\2\.Dn,isAvailable:\(\{features:([A-Za-z_$][\w$]*)\}\)=>)(\3\.inAppBrowserUseAllowed)(,migrate:([A-Za-z_$][\w$]*)\})/;
+  const BROWSER_USE_DESCRIPTOR_PATCHED_RE =
+    /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.Nn\([A-Za-z_$][\w$]*\.Dn\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/;
+  const IN_APP_BROWSER_DESCRIPTOR_RE =
+    /(\{forceReload:!0,name:([A-Za-z_$][\w$]*)\.On,isAvailable:\(\{buildFlavor:([A-Za-z_$][\w$]*),features:([A-Za-z_$][\w$]*)\}\)=>)(Jn\(\3\)&&\4\.externalBrowserUseAllowed)(\})/;
+  const IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE =
+    /\{installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.On,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
 
   const mainBuildDir = path.join(tmpDir, '.vite', 'build');
   const mainBundleFiles = Array.from(new Set([
@@ -394,6 +874,22 @@ try {
   ]));
   const settingsPatchedFiles = [];
   const settingsAlreadyImplementedFiles = [];
+
+  const trustedBrowserClientHashesPatch =
+    patchTrustedBrowserClientHashes(mainBundleFiles, chromeBrowserClientHash);
+  if (trustedBrowserClientHashesPatch.patchedFiles.length > 0) {
+    log(
+      'Chrome browser-client trusted hash patched in ' +
+      `${trustedBrowserClientHashesPatch.patchedFiles.map(filePath => path.relative(tmpDir, filePath)).join(', ')}.`,
+    );
+  } else if (trustedBrowserClientHashesPatch.alreadyCorrect) {
+    log('Chrome browser-client trusted hash already patched.');
+  } else {
+    throw new Error(
+      'Could not locate Browser Use trusted browser-client hash list to trust ' +
+      'the patched bundled Chrome browser-client.',
+    );
+  }
 
   for (const filePath of mainBundleFiles) {
     const content = fs.readFileSync(filePath, 'utf8');
@@ -532,6 +1028,82 @@ try {
         `${appServerSandboxOverridePatchedFiles.join(', ')}.`);
   } else {
     log('Desktop app-server sandbox override already patched.');
+  }
+
+  // ── Patch 38: Enable Browser Use native pipe config for offline Windows ─
+  //
+  // The direct-launch bootstrap enables the Windows node_repl backend for
+  // Computer Use. Browser Use needs the same desktop availability object to
+  // include chrome/iab backends so node_repl receives the trusted
+  // browser-client hash and request metadata.
+  const windowsBrowserUseCapabilityPatchedFiles = [];
+  let windowsBrowserUseCapabilityPatched = false;
+  let windowsBrowserUseCapabilityAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER)) {
+      windowsBrowserUseCapabilityAlreadyCorrect = true;
+      windowsBrowserUseCapabilityPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    if (!WINDOWS_BROWSER_USE_CAPABILITY_RE.test(content)) continue;
+
+    content = content.replace(
+      WINDOWS_BROWSER_USE_CAPABILITY_RE,
+      'function $1($2,{env:$3=process.env,platform:$4=process.platform}={}){' +
+        'return $4!==`win32`||$3.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?$2:' +
+        '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
+        'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
+        `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}}`,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    windowsBrowserUseCapabilityPatched = true;
+    windowsBrowserUseCapabilityPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (windowsBrowserUseCapabilityPatched) {
+    log('Windows Browser Use capability override patched in ' +
+        `${windowsBrowserUseCapabilityPatchedFiles.join(', ')}.`);
+  } else if (windowsBrowserUseCapabilityAlreadyCorrect) {
+    log('Windows Browser Use capability override already patched.');
+  } else {
+    throw new Error(
+      'Could not locate the Windows desktop feature override that enables ' +
+      'node_repl. @chrome may start node_repl without trusted browser-client ' +
+      'metadata in offline builds.',
+    );
+  }
+
+  const bundledBrowserPluginsPatch = patchBundledBrowserPlugins(mainBundleFiles, {
+    browserUseDescriptorPatchedRe: BROWSER_USE_DESCRIPTOR_PATCHED_RE,
+    browserUseDescriptorRe: BROWSER_USE_DESCRIPTOR_RE,
+    chromeDescriptorPatchedRe: CHROME_DESCRIPTOR_PATCHED_RE,
+    chromeDescriptorRe: CHROME_DESCRIPTOR_RE,
+    inAppBrowserDescriptorPatchedRe: IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE,
+    inAppBrowserDescriptorRe: IN_APP_BROWSER_DESCRIPTOR_RE,
+    patchMarker: BUNDLED_BROWSER_PLUGINS_PATCH_MARKER,
+  });
+
+  if (bundledBrowserPluginsPatch.patchedFiles.length > 0) {
+    log(
+      'Bundled browser plugins kept in runtime marketplace for offline mode in ' +
+      `${bundledBrowserPluginsPatch.patchedFiles.map(filePath => path.relative(tmpDir, filePath)).join(', ')}.`,
+    );
+  } else if (bundledBrowserPluginsPatch.alreadyCorrect) {
+    log('Bundled browser plugins runtime marketplace already patched.');
+  } else if (!bundledBrowserPluginsPatch.seen) {
+    warn(
+      'Bundled browser plugin descriptors were not found in main bundles. ' +
+      '@chrome may be filtered from the runtime marketplace in this app version.',
+    );
+  } else {
+    throw new Error(
+      'Bundled browser plugin descriptors are present in main bundles, but ' +
+      'no supported patch pattern matched. @chrome may be filtered from the ' +
+      'runtime marketplace in offline builds.',
+    );
   }
 
   // ── Patch 3: Fix enable_i18n default value inconsistency ─────────────
@@ -762,6 +1334,17 @@ try {
   const PLUGINS_BUNDLED_MARKETPLACE_GATE_FUNCTION_RE =
     /function\s+(\w+)\(\)\{return\s+[$\w]+\(`588076040`\)\}/;
 
+  // ── Patch 37: Enable external Chrome plugin mentions offline ─────────
+  //
+  // Gate 410065390 controls the renderer-side external browser availability
+  // used by the composer/plugin filters. Without this, @chrome can be
+  // installed but still hidden from mention suggestions in offline/API mode.
+  const EXTERNAL_BROWSER_USE_GATE_ID_MARKER = '`410065390`';
+  const EXTERNAL_BROWSER_USE_GATE_INLINE_RE =
+    /([,;]\s*\w+\s*=)\s*[$\w]+\(`410065390`\)/g;
+  const EXTERNAL_BROWSER_USE_GATE_FUNCTION_RE =
+    /function\s+(\w+)\(\)\{return\s+[$\w]+\(`410065390`\)\}/;
+
   // ── Patch 22: Enable Background Subagents for offline builds ───────────
   //
   // Gate 1221508807 controls whether background subagents are enabled.
@@ -809,6 +1392,8 @@ try {
   const CONTROL_GATE_ID_MARKER = '`2171042036`';
   const CONTROL_GATE_INLINE_RE =
     /([,;]\s*\w+\s*=)\s*[$\w]+\(`2171042036`\)/g;
+  const CONTROL_GATE_UNPATCHED_RE =
+    /[$\w]+\(`2171042036`\)/;
 
   // ── Patch 27: Enable Global Dictation for offline builds ───────────────
   //
@@ -860,6 +1445,8 @@ try {
   const PERSONALITY_GATE_ID_MARKER = '`1444479692`';
   const PERSONALITY_GATE_INLINE_RE =
     /([,;]\s*\w+\s*=)\s*[$\w]+\(`1444479692`\)/g;
+  const PERSONALITY_GATE_UNPATCHED_RE =
+    /[$\w]+\(`1444479692`\)/;
 
   // ── Patch 32: Enable Remote Connections for offline builds ─────────────
   //
@@ -880,6 +1467,8 @@ try {
   const REMOTE_CONNECTIONS_FEATURE_GATE_ID_MARKER = '`4114442250`';
   const REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE =
     /([,;]\s*\w+\s*=)\s*[$\w]+\(`4114442250`\)/g;
+  const REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE =
+    /[$\w]+\(`4114442250`\)/;
 
   // ── Patch 34: Enable Artifact Electron native functionality ────────────
   //
@@ -893,19 +1482,23 @@ try {
 
   // ── Patch 35: Enable Fast mode speed selector for offline builds ────────
   //
-  // The "Fast / Standard" speed selector in the model picker is gated
-  // behind two run-time conditions inside the settings chunk:
-  //   1. statsig_default_enable_features.fast_mode === true (dynamic
-  //      config – defaults to false when Statsig is unreachable)
-  //   2. authMethod === "chatgpt"
-  // The visibility hook returns: `X?.fast_mode===!0&&authCheck(arg)`.
-  // We replace the entire compound gate expression with !0 so both
-  // conditions are satisfied and the button is always visible.
+  // Older builds used a Statsig fast_mode gate:
+  //   X?.fast_mode===!0&&authCheck(arg)
+  // Newer builds route the composer/settings Speed selector through a helper:
+  //   function F(e){return I(e).canUseFastMode}
+  // In offline packages the model metadata can fail that availability test
+  // after Fast is selected, hiding the only UI that can switch back to
+  // Standard.  Patch only the selector visibility helper; the service-tier
+  // setter still writes null/"fast" exactly as upstream does.
   const FAST_MODE_STORE_MARKER = 'statsig_default_enable_features';
   const FAST_MODE_KEY_MARKER = 'fast_mode';
+  const FAST_MODE_SELECTOR_PATCH_MARKER = '/*codex-offline:fast-mode-selector*/';
   // Matches: X?.fast_mode===!0&&Y(Z)  or  X.fast_mode===!0&&Y(Z)
   const FAST_MODE_GATE_RE =
     /[$\w]+(?:\?\.|\.)fast_mode===!0&&[$\w]+\([$\w]+\)/;
+  const FAST_MODE_AVAILABILITY_MARKERS = ['additionalSpeedTiers', 'canUseFastMode'];
+  const FAST_MODE_AVAILABILITY_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return\s+[A-Za-z_$][\w$]*\(\2\)\.canUseFastMode\}/;
 
   const AUTOMATION_DIALOG_CWD_PATCHES = [
     {
@@ -978,6 +1571,8 @@ try {
     let inAppBrowserGateSeen = false;
     let pluginsBundledMarketplaceGateCount = 0;
     let pluginsBundledMarketplaceGateSeen = false;
+    let externalBrowserUseGateCount = 0;
+    let externalBrowserUseGateSeen = false;
     let automationDialogCwdPatched = false;
     const automationDialogCwdUnpatchedFiles = [];
     let backgroundSubagentsGatePatched = false;
@@ -1010,6 +1605,7 @@ try {
     let artifactElectronGateSeen = false;
     let fastModeGatePatched = false;
     let fastModeGateSeen = false;
+    let fastModeGateAlreadyCorrect = false;
 
     for (const file of fs.readdirSync(assetsDir)) {
       if (!file.endsWith('.js')) continue;
@@ -1079,11 +1675,15 @@ try {
       pluginsBundledMarketplaceGateSeen ||=
         originalContent.match(PLUGINS_BUNDLED_MARKETPLACE_GATE_INLINE_RE) !== null ||
         PLUGINS_BUNDLED_MARKETPLACE_GATE_FUNCTION_RE.test(originalContent);
+      externalBrowserUseGateSeen ||=
+        originalContent.match(EXTERNAL_BROWSER_USE_GATE_INLINE_RE) !== null ||
+        EXTERNAL_BROWSER_USE_GATE_FUNCTION_RE.test(originalContent) ||
+        originalContent.includes(EXTERNAL_BROWSER_USE_GATE_ID_MARKER);
       backgroundSubagentsGateSeen ||= originalContent.includes(BACKGROUND_SUBAGENTS_GATE_ID_MARKER);
       threadOverlayGateSeen ||= originalContent.includes(THREAD_OVERLAY_GATE_ID_MARKER);
       multiWindowGateSeen ||= originalContent.includes(MULTI_WINDOW_GATE_ID_MARKER);
       computerUseGateSeen ||= originalContent.includes(COMPUTER_USE_GATE_ID_MARKER);
-      controlGateSeen ||= originalContent.includes(CONTROL_GATE_ID_MARKER);
+      controlGateSeen ||= CONTROL_GATE_UNPATCHED_RE.test(originalContent);
       dictation1GateSeen ||= originalContent.includes(DICTATION_GATE_1_ID_MARKER);
       dictation2GateSeen ||= originalContent.includes(DICTATION_GATE_2_ID_MARKER);
       browserNonlocalGateSeen ||= originalContent.includes(BROWSER_NONLOCAL_GATE_ID_MARKER);
@@ -1091,19 +1691,25 @@ try {
       chronicleGateSeen ||=
         CHRONICLE_GATE_FUNCTION_RE.test(originalContent) ||
         originalContent.includes(CHRONICLE_GATE_ID_MARKER);
-      personalityGateSeen ||= originalContent.includes(PERSONALITY_GATE_ID_MARKER);
+      personalityGateSeen ||= PERSONALITY_GATE_UNPATCHED_RE.test(originalContent);
       remoteConnectionsGateSeen ||=
         REMOTE_CONNECTIONS_GATE_FUNCTION_RE.test(originalContent) ||
         originalContent.includes(REMOTE_CONNECTIONS_GATE_ID_MARKER);
       remoteConnectionsFeatureGateSeen ||=
-        originalContent.includes(REMOTE_CONNECTIONS_FEATURE_GATE_ID_MARKER);
+        REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE.test(originalContent);
       artifactElectronGateSeen ||=
         ARTIFACT_ELECTRON_GATE_FUNCTION_RE.test(originalContent) ||
         originalContent.includes(ARTIFACT_ELECTRON_GATE_ID_MARKER);
       fastModeGateSeen ||=
-        originalContent.includes(FAST_MODE_STORE_MARKER) &&
-        originalContent.includes(FAST_MODE_KEY_MARKER);
-
+        (
+          originalContent.includes(FAST_MODE_STORE_MARKER) &&
+          originalContent.includes(FAST_MODE_KEY_MARKER)
+        ) ||
+        (
+          FAST_MODE_AVAILABILITY_MARKERS.every(marker => originalContent.includes(marker)) &&
+          FAST_MODE_AVAILABILITY_RE.test(originalContent)
+        ) ||
+        originalContent.includes(FAST_MODE_SELECTOR_PATCH_MARKER);
       if (content.includes(I18N_NEEDLE)) {
         const count = content.split(I18N_NEEDLE).length - 1;
         content = content.replaceAll(I18N_NEEDLE, I18N_REPLACEMENT);
@@ -1463,6 +2069,19 @@ try {
         }
       }
 
+      {
+        const inlineMatches = content.match(EXTERNAL_BROWSER_USE_GATE_INLINE_RE);
+        if (inlineMatches) {
+          content = content.replaceAll(EXTERNAL_BROWSER_USE_GATE_INLINE_RE, '$1!0');
+          externalBrowserUseGateCount += inlineMatches.length;
+          modified = true;
+        } else if (EXTERNAL_BROWSER_USE_GATE_FUNCTION_RE.test(content)) {
+          content = content.replace(EXTERNAL_BROWSER_USE_GATE_FUNCTION_RE, 'function $1(){return!0}');
+          externalBrowserUseGateCount += 1;
+          modified = true;
+        }
+      }
+
       // Patch 22: Background Subagents
       if (BACKGROUND_SUBAGENTS_GATE_FUNCTION_RE.test(content)) {
         content = content.replace(BACKGROUND_SUBAGENTS_GATE_FUNCTION_RE, 'function $1(){return!0}');
@@ -1611,13 +2230,24 @@ try {
       }
 
       // Patch 35: Fast mode speed selector
-      // Only process files that contain both marker strings (the settings chunk).
-      if (
+      if (content.includes(FAST_MODE_SELECTOR_PATCH_MARKER)) {
+        fastModeGateAlreadyCorrect = true;
+      } else if (
         content.includes(FAST_MODE_STORE_MARKER) &&
         content.includes(FAST_MODE_KEY_MARKER) &&
         FAST_MODE_GATE_RE.test(content)
       ) {
         content = content.replace(FAST_MODE_GATE_RE, '!0');
+        fastModeGatePatched = true;
+        modified = true;
+      } else if (
+        FAST_MODE_AVAILABILITY_MARKERS.every(marker => content.includes(marker)) &&
+        FAST_MODE_AVAILABILITY_RE.test(content)
+      ) {
+        content = content.replace(
+          FAST_MODE_AVAILABILITY_RE,
+          `function $1($2){return!0${FAST_MODE_SELECTOR_PATCH_MARKER}}`,
+        );
         fastModeGatePatched = true;
         modified = true;
       }
@@ -1893,6 +2523,20 @@ try {
       );
     }
 
+    if (externalBrowserUseGateCount > 0) {
+      log(
+        'External Chrome plugin mention gate bypassed for offline mode ' +
+        `(${externalBrowserUseGateCount} occurrence(s)).`,
+      );
+    } else if (!externalBrowserUseGateSeen) {
+      log('External browser use gate 410065390 is not present in this app version. No patch needed.');
+    } else {
+      throw new Error(
+        'External browser use gate 410065390 is still present, but no ' +
+        'supported patch pattern matched. @chrome may be hidden in the composer.',
+      );
+    }
+
     if (backgroundSubagentsGatePatched) {
       log('Background subagents gate bypassed for offline mode.');
     } else if (!backgroundSubagentsGateSeen) {
@@ -2059,11 +2703,13 @@ try {
 
     if (fastModeGatePatched) {
       log('Fast mode speed selector gate bypassed for offline mode.');
+    } else if (fastModeGateAlreadyCorrect) {
+      log('Fast mode speed selector gate already bypassed in this app version. No patch needed.');
     } else if (!fastModeGateSeen) {
-      log('Fast mode gate (statsig_default_enable_features.fast_mode) is not present in this app version. No patch needed.');
+      log('Fast mode selector gate is not present in this app version. No patch needed.');
     } else {
       warn(
-        'Fast mode gate (statsig_default_enable_features.fast_mode) is still present, but no supported ' +
+        'Fast mode selector gate is still present, but no supported ' +
         'patch pattern matched. The Fast mode speed selector may be hidden in offline builds.',
       );
     }

@@ -147,6 +147,22 @@ function Export-AppSource {
     }
 }
 
+function Get-ChromeExtensionConfig {
+    param([Parameter(Mandatory = $true)][string]$AppRoot)
+
+    $configPath = Join-Path $AppRoot 'resources\plugins\openai-bundled\plugins\chrome\scripts\extension-id.json'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        return $null
+    }
+
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$config.extensionId)) {
+        throw "Chrome plugin extension config is missing extensionId: $configPath"
+    }
+
+    return $config
+}
+
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $configFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $ConfigPath
@@ -192,14 +208,47 @@ if (Test-Path $packageRoot) {
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
 
-# Internal subdirectory — holds app payload and data files users don't need to
-# touch.  Only the .cmd launchers and the env config example are at the root.
+# Internal subdirectory holds app payload and implementation files users do not
+# need for daily use. Setup creates the daily Codex shortcut after first run.
 $internalRoot = Join-Path $packageRoot '_internal'
 New-Item -ItemType Directory -Force -Path $internalRoot | Out-Null
 
 Write-BuildTrace 'App payload copied to _internal.'
 Copy-Item -Path (Join-Path $sourceExportRoot 'app') -Destination (Join-Path $internalRoot 'app') -Recurse -Force
 Copy-Item -Path (Join-Path $scriptRoot 'bootstrap-codex-skills.ps1') -Destination (Join-Path $internalRoot 'bootstrap-codex-skills.ps1') -Force
+Copy-Item -Path (Join-Path $scriptRoot 'repair-chrome-host.ps1') -Destination (Join-Path $internalRoot 'repair-chrome-host.ps1') -Force
+Copy-Item -Path (Join-Path $scriptRoot 'setup-codex-offline.ps1') -Destination (Join-Path $internalRoot 'setup-codex-offline.ps1') -Force
+
+$chromeExtensionInfo = $null
+$chromeExtensionConfig = Get-ChromeExtensionConfig -AppRoot (Join-Path $internalRoot 'app')
+if ($null -eq $chromeExtensionConfig) {
+    throw 'Bundled Chrome plugin was not found in the app payload, so @chrome offline assets cannot be packaged.'
+}
+
+Write-BuildTrace 'Bundling Chrome extension offline assets.'
+$chromeExtensionRoot = Join-Path $internalRoot 'chrome-extension'
+$downloadChromeExtensionArgs = @(
+    (Join-Path $scriptRoot 'download-chrome-extension.mjs'),
+    '--extension-id',
+    [string]$chromeExtensionConfig.extensionId,
+    '--destination',
+    $chromeExtensionRoot
+)
+$chromeExtensionSourceCrxProperty = $config.packaging.PSObject.Properties['chromeExtensionSourceCrx']
+$chromeExtensionSourceCrx = if ($null -ne $chromeExtensionSourceCrxProperty) { [string]$chromeExtensionSourceCrxProperty.Value } else { '' }
+if (-not [string]::IsNullOrWhiteSpace($chromeExtensionSourceCrx)) {
+    $downloadChromeExtensionArgs += @(
+        '--source-crx',
+        (Resolve-AbsolutePath -BasePath $repoRoot -PathValue $chromeExtensionSourceCrx)
+    )
+}
+
+$chromeExtensionJson = & node @downloadChromeExtensionArgs
+if ($LASTEXITCODE -ne 0) {
+    throw 'download-chrome-extension.mjs failed.'
+}
+$chromeExtensionInfo = ($chromeExtensionJson -join [Environment]::NewLine) | ConvertFrom-Json
+Write-BuildTrace 'Chrome extension offline assets bundled.'
 
 # Patch app.asar so Codex runs correctly outside the MSIX container.
 $patchScript = Join-Path $scriptRoot 'patch-app-asar.mjs'
@@ -227,51 +276,61 @@ if (Test-Path $readmeSrc) {
     Copy-Item -Path $readmeSrc -Destination (Join-Path $packageRoot 'README.md') -Force
 }
 
-# Generate a small VBScript wrapper that launches PowerShell without showing a
-# console window.  The .cmd files call this wrapper so the user never sees a
-# flashing terminal.
-$launcherVbs = @'
-Set shell = CreateObject("WScript.Shell")
-scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-psArgs = "-NoProfile -ExecutionPolicy Bypass -File """ & scriptDir & "\_internal\bootstrap-codex-skills.ps1"""
-exitCode = shell.Run("powershell.exe " & psArgs, 0, True)
-If exitCode = 2 Then
-    MsgBox "Launch canceled before syncing bundled skills.", vbExclamation, "Codex Offline"
-ElseIf exitCode <> 0 Then
-    MsgBox "Codex Offline could not start. Please run the command-line launcher for details.", vbCritical, "Codex Offline"
-End If
-'@
-$launcherVbs | Set-Content -Path (Join-Path $packageRoot 'Launch Codex Offline.vbs') -Encoding ASCII
-
-$syncVbs = @'
-Set shell = CreateObject("WScript.Shell")
-scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-psArgs = "-NoProfile -ExecutionPolicy Bypass -File """ & scriptDir & "\_internal\bootstrap-codex-skills.ps1"" -NoLaunch"
-exitCode = shell.Run("powershell.exe " & psArgs, 0, True)
-If exitCode = 0 Then
-    MsgBox "Official skills were synced to your local Codex skills directory. Open the Skills page in Codex to use them as needed.", vbInformation, "Codex Offline"
-ElseIf exitCode = 2 Then
-    MsgBox "Skill sync canceled.", vbExclamation, "Codex Offline"
-Else
-    MsgBox "Skill sync failed. Please run the command-line launcher for details.", vbCritical, "Codex Offline"
-End If
-'@
-$syncVbs | Set-Content -Path (Join-Path $packageRoot 'Sync Codex Skills.vbs') -Encoding ASCII
-
-# Keep .cmd launchers as fallback for users who prefer command-line access.
-$launchCmd = @(
+# Generate the one-time setup command. Setup is intentionally visible because
+# Chrome extension loading and native-host repair failures need readable output.
+$dailyLaunchCmd = @(
     '@echo off',
     'setlocal',
-    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0_internal\bootstrap-codex-skills.ps1" -SkipSkillSync'
+    'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
+    'start "" "%~dp0_internal\app\Codex.exe" %*'
 )
-$launchCmd | Set-Content -Path (Join-Path $packageRoot 'Launch Codex Offline.cmd') -Encoding ASCII
+$dailyLaunchCmd | Set-Content -Path (Join-Path $packageRoot 'Codex.cmd') -Encoding ASCII
 
-$syncCmd = @(
+$setupCmd = @(
     '@echo off',
     'setlocal',
-    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0_internal\bootstrap-codex-skills.ps1" -NoLaunch'
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0_internal\setup-codex-offline.ps1" %*',
+    'set SETUP_EXIT=%ERRORLEVEL%',
+    'if not "%SETUP_EXIT%"=="0" (',
+    '  echo.',
+    '  echo Codex Offline setup failed with exit code %SETUP_EXIT%.',
+    '  pause',
+    ')',
+    'exit /b %SETUP_EXIT%'
 )
-$syncCmd | Set-Content -Path (Join-Path $packageRoot 'Sync Codex Skills.cmd') -Encoding ASCII
+$setupCmd | Set-Content -Path (Join-Path $packageRoot 'Setup Codex.cmd') -Encoding ASCII
+
+$toolsRoot = Join-Path $internalRoot 'tools'
+New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+
+$launchDirectCmd = @(
+    '@echo off',
+    'setlocal',
+    'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
+    'start "" "%~dp0..\app\Codex.exe" %*'
+)
+$launchDirectCmd | Set-Content -Path (Join-Path $toolsRoot 'Launch Codex Direct.cmd') -Encoding ASCII
+
+$syncDefaultCmd = @(
+    '@echo off',
+    'setlocal',
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\bootstrap-codex-skills.ps1" -NoLaunch %*'
+)
+$syncDefaultCmd | Set-Content -Path (Join-Path $toolsRoot 'Sync Default Skills.cmd') -Encoding ASCII
+
+$syncAllCmd = @(
+    '@echo off',
+    'setlocal',
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\bootstrap-codex-skills.ps1" -NoLaunch -SkillProfile all %*'
+)
+$syncAllCmd | Set-Content -Path (Join-Path $toolsRoot 'Sync All Skills.cmd') -Encoding ASCII
+
+$repairChromeHostCmd = @(
+    '@echo off',
+    'setlocal',
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\repair-chrome-host.ps1" %*'
+)
+$repairChromeHostCmd | Set-Content -Path (Join-Path $toolsRoot 'Repair Chrome Host.cmd') -Encoding ASCII
 
 Write-BuildTrace 'Resolving skill source roots.'
 $skillSources = @()
@@ -280,13 +339,18 @@ foreach ($source in $config.skills.sources) {
 }
 
 Write-BuildTrace 'Bundling skills.'
+$defaultInstallProfileProperty = $config.skills.PSObject.Properties['defaultInstallProfile']
+$defaultInstallProfile = if ($null -ne $defaultInstallProfileProperty) { [string]$defaultInstallProfileProperty.Value } else { 'offline' }
+$defaultInstallPathsProperty = $config.skills.PSObject.Properties['defaultInstallPaths']
+$defaultInstallPaths = if ($null -ne $defaultInstallPathsProperty) { @($defaultInstallPathsProperty.Value | ForEach-Object { [string]$_ }) } else { @() }
 & (Join-Path $scriptRoot 'bundle-skills.ps1') `
     -SourceRoots $skillSources `
     -Destination (Join-Path $internalRoot 'seed/codex-home/skills') `
     -ManifestPath (Join-Path $internalRoot 'seed/skills-manifest.json') `
-    -PackageVersion $version | Out-Null
+    -PackageVersion $version `
+    -DefaultInstallProfile $defaultInstallProfile `
+    -DefaultInstallPaths $defaultInstallPaths | Out-Null
 Write-BuildTrace 'Skills bundled.'
-
 $buildInfo = [ordered]@{
     appName = $config.appName
     packageId = $config.packageId
@@ -295,6 +359,11 @@ $buildInfo = [ordered]@{
     builtAt = (Get-Date).ToString('o')
     sourceMetadata = $sourceMetadata
     appSource = $appSourceInfo
+    chromeExtension = $chromeExtensionInfo
+    skills = [ordered]@{
+        defaultInstallProfile = $defaultInstallProfile
+        defaultInstallPaths = $defaultInstallPaths
+    }
 }
 
 Write-BuildTrace 'Build info written.'

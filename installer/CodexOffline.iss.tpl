@@ -26,10 +26,21 @@ PrivilegesRequired=lowest
 [Files]
 Source: "{#MySourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+Type: files; Name: "{app}\Codex.exe"
+Type: files; Name: "{app}\Codex.lnk"
+Type: files; Name: "{app}\Setup Codex.vbs"
+Type: files; Name: "{app}\Launch Codex Offline.vbs"
+Type: files; Name: "{app}\Launch Codex Offline.cmd"
+Type: files; Name: "{app}\Sync Codex Skills.vbs"
+Type: files; Name: "{app}\Sync Codex Skills.cmd"
+Type: files; Name: "{app}\Repair Chrome Host.vbs"
+Type: files; Name: "{app}\Repair Chrome Host.cmd"
+
 [Icons]
-Name: "{group}\Launch Codex Offline"; Filename: "{app}\Launch Codex Offline.vbs"; IconFilename: "{app}\_internal\app\Codex.exe"
-Name: "{autodesktop}\Launch Codex Offline"; Filename: "{app}\Launch Codex Offline.vbs"; IconFilename: "{app}\_internal\app\Codex.exe"
-Name: "{group}\Sync Codex Skills"; Filename: "{app}\Sync Codex Skills.vbs"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{group}\Codex"; Filename: "{app}\_internal\app\Codex.exe"; WorkingDir: "{app}\_internal\app"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{autodesktop}\Codex"; Filename: "{app}\_internal\app\Codex.exe"; WorkingDir: "{app}\_internal\app"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{group}\Setup Codex"; Filename: "{app}\Setup Codex.cmd"; IconFilename: "{app}\_internal\app\Codex.exe"
 
 [Run]
-Filename: "{app}\Launch Codex Offline.vbs"; Description: "Launch Codex Offline"; Flags: nowait postinstall skipifsilent shellexec
+Filename: "{app}\Setup Codex.cmd"; Description: "Set up Codex Offline"; Flags: nowait postinstall skipifsilent shellexec
