@@ -387,6 +387,9 @@ const path = require('path');
 
 const asarPath = process.argv[1];
 const PATCH_MARKER = '/* codex-offline:windowsStore-patch */';
+const SETTINGS_ROUTE_BAD_PATTERN_RE =
+  /searchParams\.set\("initialRoute","\/settings\/"\+\([A-Za-z_$][\w$]*\.section\|\|"agent"\)\);/;
+const LOCALE_SOURCE_BAD_PATTERN = '.get(`locale_source`,`IDE`)';
 const SLASH_GATE_NEEDLE = '$f(`1609556872`)';
 const SLASH_UI_MARKERS = [
   'composer.slashCommands.dialogTitle',
@@ -459,6 +462,8 @@ let windowsBrowserUseCapabilityPatched = false;
 let pluginsApiKeyNavPatched = false;
 let pluginsApiKeyRoutePatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
+const settingsRouteResiduals = [];
+const localeSourceResiduals = [];
 
 for (const entry of javaScriptEntries) {
   const content = asar.extractFile(asarPath, entryMap.get(entry)).toString('utf8');
@@ -477,6 +482,12 @@ for (const entry of javaScriptEntries) {
   ) {
     bundledBrowserPluginForceReloadResiduals.push(entry);
   }
+  if (SETTINGS_ROUTE_BAD_PATTERN_RE.test(content)) {
+    settingsRouteResiduals.push(entry);
+  }
+  if (content.includes(LOCALE_SOURCE_BAD_PATTERN)) {
+    localeSourceResiduals.push(entry);
+  }
   const matchedGateIds = KNOWN_RAW_GATE_IDS.filter(gateId => content.includes('`' + gateId + '`'));
   if (matchedGateIds.length > 0) {
     residualGateMatches.push(`${entry}: ${matchedGateIds.join(', ')}`);
@@ -490,6 +501,18 @@ if (residualGateMatches.length > 0) {
   throw new Error(
     'Known gate ids are still present after patching: ' +
     residualGateMatches.join(' | ')
+  );
+}
+if (settingsRouteResiduals.length > 0) {
+  throw new Error(
+    'Settings deep-link route still uses unmapped section slugs: ' +
+    settingsRouteResiduals.join(', ')
+  );
+}
+if (localeSourceResiduals.length > 0) {
+  throw new Error(
+    'Renderer i18n provider still defaults locale_source to IDE: ' +
+    localeSourceResiduals.join(', ')
   );
 }
 

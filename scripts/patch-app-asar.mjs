@@ -22,10 +22,12 @@
  *    config file in the system editor.  Three variable-naming variants are
  *    handled (V1: message=t/wc=e, V2: message=r/wc=n, V3: message=i/wc=r).
  *
- * 3. Fix enable_i18n default value inconsistency
+ * 3. Fix i18n defaults for offline builds
  *    The settings page defaults enable_i18n to true (so the language selector
  *    is visible), but the i18n provider defaults it to false (so translations
- *    never load).  We unify the default to true.
+ *    never load) and prefers the IDE locale by default.  Offline desktop
+ *    builds should default to the system locale instead.  We unify
+ *    enable_i18n to true and switch the locale-source default to SYSTEM.
  *
  * 4. Enable settings page entry for offline builds
  *    The settings menu item is gated behind a Statsig experiment that
@@ -236,6 +238,36 @@ function matchesPattern(content, pattern) {
 
   pattern.lastIndex = 0;
   return pattern.test(content);
+}
+
+const SETTINGS_SECTION_ROUTE_ALIASES = [
+  ['general', 'general-settings'],
+  ['git', 'git-settings'],
+  ['plugins', 'plugins-settings'],
+  ['skills', 'skills-settings'],
+  ['mcp', 'mcp-settings'],
+  ['hooks', 'hooks-settings'],
+];
+const SETTINGS_ROUTE_PATCH_MARKER =
+  '/*codex-offline:settings-route-map*/';
+
+function buildSettingsRouteMappingExpression(sectionVar) {
+  return SETTINGS_SECTION_ROUTE_ALIASES.reduceRight(
+    (fallback, [section, slug]) => (
+      `${sectionVar}===\`${section}\`?\`${slug}\`:${fallback}`
+    ),
+    sectionVar,
+  );
+}
+
+function buildSettingsRouteStatement(urlVar, messageVar) {
+  const sectionVar = '_codexOfflineSettingsSection';
+  return (
+    `let ${sectionVar}=${messageVar}.section||"agent";` +
+    `${urlVar}.searchParams.set("initialRoute","/settings/"+` +
+    `${buildSettingsRouteMappingExpression(sectionVar)});` +
+    `${SETTINGS_ROUTE_PATCH_MARKER}`
+  );
 }
 
 function patchBundledBrowserPlugins(filePaths, options) {
@@ -747,12 +779,16 @@ try {
       'let _u=new URL(e.getURL());' +
       '_u.searchParams.set("initialRoute",r);' +
       'e.loadURL(_u.toString())}';
+  const SETTINGS_ROUTE_DIRECT_RE_GLOBAL =
+    /([A-Za-z_$][\w$]*)\.searchParams\.set\("initialRoute","\/settings\/"\+\(([A-Za-z_$][\w$]*)\.section\|\|"agent"\)\);/g;
 
   const SETTINGS_REPLACEMENT_V1 =
     // show-settings: reload the renderer with the desired settings route
     'case`show-settings`:{' +
       NAV_HELPER + ';' +
-      '_nav(e,"/settings/"+(t.section||"agent"));break}' +
+      'let _codexOfflineSettingsSection=t.section||"agent";' +
+      `_nav(e,"/settings/"+${buildSettingsRouteMappingExpression('_codexOfflineSettingsSection')});` +
+      `${SETTINGS_ROUTE_PATCH_MARKER};break}` +
     // open-extension-settings: route to general settings
     'case`open-extension-settings`:{' +
       NAV_HELPER + ';' +
@@ -775,7 +811,7 @@ try {
     'case`show-settings`:{' +
       'let e=t.BrowserWindow.fromWebContents(n);' +
       'if(e){let i=new URL(e.getURL());' +
-      'i.searchParams.set("initialRoute","/settings/"+(r.section||"agent"));' +
+      buildSettingsRouteStatement('i', 'r') +
       'e.loadURL(i.toString())}' +
       'break}' +
     'case`open-extension-settings`:{' +
@@ -803,7 +839,7 @@ try {
     'case`show-settings`:{' +
       'let e=n.BrowserWindow.fromWebContents(r);' +
       'if(e){let t=new URL(e.getURL());' +
-      't.searchParams.set("initialRoute","/settings/"+(i.section||"agent"));' +
+      buildSettingsRouteStatement('t', 'i') +
       'e.loadURL(t.toString())}' +
       'break}' +
     'case`open-extension-settings`:{' +
@@ -826,18 +862,6 @@ try {
     'case`navigate-in-new-editor-tab`:case`open-vscode-command`:' +
     'case`install-wsl`:' +
     'throw Error(`"${i.type}" is not implemented in Electron.`)';
-  // Newer upstream builds already ship these handlers. Recognize that shape so
-  // we do not warn just because the old "not implemented" needle disappeared.
-  const SETTINGS_ALREADY_IMPLEMENTED_PATTERNS = [
-    'case`show-settings`:{let ',
-    'searchParams.set("initialRoute","/settings/"+(',
-    'case`open-extension-settings`:{let ',
-    'case`open-keyboard-shortcuts`:{let ',
-    'searchParams.set("initialRoute","/settings/general-settings")',
-    'case`open-config-toml`:{let ',
-    '.shell.openPath(',
-    'case`navigate-in-new-editor-tab`:case`open-vscode-command`:case`install-wsl`:throw Error(`',
-  ];
   const AUTOMATION_CWD_NORMALIZER_INLINE =
     'e=>typeof e==`string`&&e.startsWith(`\\\\\\\\?\\\\`)&&/^[A-Za-z]:/.test(e.slice(4))?e.slice(4):e';
   const AUTOMATION_RUNTIME_CWD_RE =
@@ -876,7 +900,9 @@ try {
     ...listJavaScriptFiles(mainBuildDir),
   ]));
   const settingsPatchedFiles = [];
-  const settingsAlreadyImplementedFiles = [];
+  const settingsRoutePatchedFiles = [];
+  const settingsRouteAlreadyCorrectFiles = [];
+  let settingsHandlerSeen = false;
 
   const trustedBrowserClientHashesPatch =
     patchTrustedBrowserClientHashes(mainBundleFiles, chromeBrowserClientHash);
@@ -895,47 +921,77 @@ try {
   }
 
   for (const filePath of mainBundleFiles) {
-    const content = fs.readFileSync(filePath, 'utf8');
-    if (SETTINGS_ALREADY_IMPLEMENTED_PATTERNS.every((pattern) => content.includes(pattern))) {
-      settingsAlreadyImplementedFiles.push(path.relative(tmpDir, filePath));
-      continue;
-    }
+    let content = fs.readFileSync(filePath, 'utf8');
+    const originalContent = content;
+    let modified = false;
 
-    let patchedContent = null;
+    settingsHandlerSeen ||= content.includes('case`show-settings`:{');
 
     if (content.includes(NOT_IMPLEMENTED_NEEDLE_V1)) {
-      patchedContent = content.replace(
+      content = content.replace(
         NOT_IMPLEMENTED_NEEDLE_V1,
         SETTINGS_REPLACEMENT_V1,
       );
+      modified = true;
+      settingsPatchedFiles.push(path.relative(tmpDir, filePath));
     } else if (content.includes(NOT_IMPLEMENTED_NEEDLE_V2)) {
-      patchedContent = content.replace(
+      content = content.replace(
         NOT_IMPLEMENTED_NEEDLE_V2,
         SETTINGS_REPLACEMENT_V2,
       );
+      modified = true;
+      settingsPatchedFiles.push(path.relative(tmpDir, filePath));
     } else if (content.includes(NOT_IMPLEMENTED_NEEDLE_V3)) {
-      patchedContent = content.replace(
+      content = content.replace(
         NOT_IMPLEMENTED_NEEDLE_V3,
         SETTINGS_REPLACEMENT_V3,
       );
+      modified = true;
+      settingsPatchedFiles.push(path.relative(tmpDir, filePath));
     }
 
-    if (patchedContent == null) continue;
+    SETTINGS_ROUTE_DIRECT_RE_GLOBAL.lastIndex = 0;
+    const routeMatches = content.match(SETTINGS_ROUTE_DIRECT_RE_GLOBAL);
+    if (routeMatches) {
+      SETTINGS_ROUTE_DIRECT_RE_GLOBAL.lastIndex = 0;
+      content = content.replace(
+        SETTINGS_ROUTE_DIRECT_RE_GLOBAL,
+        (_, urlVar, messageVar) => buildSettingsRouteStatement(urlVar, messageVar),
+      );
+      modified = true;
+      settingsRoutePatchedFiles.push(path.relative(tmpDir, filePath));
+    } else if (
+      originalContent.includes(SETTINGS_ROUTE_PATCH_MARKER) ||
+      content.includes(SETTINGS_ROUTE_PATCH_MARKER)
+    ) {
+      settingsRouteAlreadyCorrectFiles.push(path.relative(tmpDir, filePath));
+    }
 
-    fs.writeFileSync(filePath, patchedContent, 'utf8');
-    settingsPatchedFiles.push(path.relative(tmpDir, filePath));
+    if (modified) {
+      fs.writeFileSync(filePath, content, 'utf8');
+    }
   }
 
   if (settingsPatchedFiles.length > 0) {
     log(`Settings IPC handlers patched in ${settingsPatchedFiles.join(', ')}.`);
   }
-  if (settingsAlreadyImplementedFiles.length > 0) {
+  if (settingsRoutePatchedFiles.length > 0) {
     log(
-      `Settings IPC handlers already implemented in ` +
-      `${settingsAlreadyImplementedFiles.join(', ')}.`,
+      `Settings route mapping fixed in ` +
+      `${settingsRoutePatchedFiles.join(', ')}.`,
     );
   }
-  if (settingsPatchedFiles.length === 0 && settingsAlreadyImplementedFiles.length === 0) {
+  if (
+    settingsPatchedFiles.length === 0 &&
+    settingsRoutePatchedFiles.length === 0 &&
+    settingsRouteAlreadyCorrectFiles.length > 0
+  ) {
+    log(
+      `Settings IPC handlers already patched in ` +
+      `${settingsRouteAlreadyCorrectFiles.join(', ')}.`,
+    );
+  }
+  if (!settingsHandlerSeen) {
     warn('Could not locate the "not implemented" throw for show-settings. ' +
          'Settings patch skipped (the app version may have changed).');
   }
@@ -1124,6 +1180,13 @@ try {
   const I18N_REPLACEMENT = '.get(`enable_i18n`,!0)';
   // Marker present when the upstream code already has the correct default.
   const I18N_ALREADY_CORRECT_MARKER = '.get(`enable_i18n`,!0)';
+  const LOCALE_SOURCE_NEEDLE = '.get(`locale_source`,`IDE`)';
+  const LOCALE_SOURCE_PATCH_MARKER =
+    '/*codex-offline:locale-source-default*/';
+  const LOCALE_SOURCE_REPLACEMENT =
+    '.get(`locale_source`,`SYSTEM`)' + LOCALE_SOURCE_PATCH_MARKER;
+  const LOCALE_SOURCE_ALREADY_CORRECT_MARKER =
+    '.get(`locale_source`,`SYSTEM`)';
 
   // ── Patch 4: Enable settings page entry for offline builds ─────────
   //
@@ -1557,6 +1620,8 @@ try {
   if (fs.existsSync(assetsDir)) {
     let i18nCount = 0;
     let i18nAlreadyCorrect = false;
+    let localeSourceCount = 0;
+    let localeSourceAlreadyCorrect = false;
     let gatePatched = false;
     let settingsGateSeen = false;
     let automationsGatePatched = false;
@@ -1752,6 +1817,15 @@ try {
         modified = true;
       } else if (content.includes(I18N_ALREADY_CORRECT_MARKER)) {
         i18nAlreadyCorrect = true;
+      }
+
+      if (content.includes(LOCALE_SOURCE_NEEDLE)) {
+        const count = content.split(LOCALE_SOURCE_NEEDLE).length - 1;
+        content = content.replaceAll(LOCALE_SOURCE_NEEDLE, LOCALE_SOURCE_REPLACEMENT);
+        localeSourceCount += count;
+        modified = true;
+      } else if (content.includes(LOCALE_SOURCE_ALREADY_CORRECT_MARKER)) {
+        localeSourceAlreadyCorrect = true;
       }
 
       if (SETTINGS_GATE_RE.test(content)) {
@@ -2400,6 +2474,15 @@ try {
     } else {
       warn('Could not locate enable_i18n default-false pattern. ' +
            'i18n patch skipped (the app version may have changed).');
+    }
+
+    if (localeSourceCount > 0) {
+      log(`locale_source default switched to SYSTEM (${localeSourceCount} occurrence(s)).`);
+    } else if (localeSourceAlreadyCorrect) {
+      log('locale_source default already set to SYSTEM in this app version. No patch needed.');
+    } else {
+      warn('Could not locate locale_source default-IDE pattern. ' +
+           'Locale-source patch skipped (the app version may have changed).');
     }
 
     if (gatePatched) {
