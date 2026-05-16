@@ -186,7 +186,7 @@ try {
     $chromePluginRoot = Join-Path $portableRoot '_internal\app\resources\plugins\openai-bundled\plugins\chrome'
     $bundledMarketplaceRoot = Join-Path $portableRoot '_internal\app\resources\plugins\openai-bundled'
     $bundledMarketplaceManifestPath = Join-Path $bundledMarketplaceRoot '.agents\plugins\marketplace.json'
-    $browserUsePluginRoot = Join-Path $bundledMarketplaceRoot 'plugins\browser-use'
+    $browserPluginRoot = Join-Path $bundledMarketplaceRoot 'plugins\browser'
     if (-not (Test-Path $bundledMarketplaceManifestPath -PathType Leaf)) {
         throw 'Bundled OpenAI plugin marketplace manifest was not found in the portable package.'
     }
@@ -225,11 +225,11 @@ try {
             throw "Bundled runtime plugin '$offlineRuntimePluginName' is missing its skill entrypoint."
         }
     }
-    if (-not (Test-Path (Join-Path $browserUsePluginRoot '.codex-plugin\plugin.json') -PathType Leaf)) {
-        throw 'Bundled browser-use plugin manifest was not found in the portable package.'
+    if (-not (Test-Path (Join-Path $browserPluginRoot '.codex-plugin\plugin.json') -PathType Leaf)) {
+        throw 'Bundled browser plugin manifest was not found in the portable package.'
     }
-    if (-not (Test-Path (Join-Path $browserUsePluginRoot 'scripts\browser-client.mjs') -PathType Leaf)) {
-        throw 'Bundled browser-use plugin is missing scripts\browser-client.mjs.'
+    if (-not (Test-Path (Join-Path $browserPluginRoot 'skills\browser\SKILL.md') -PathType Leaf)) {
+        throw 'Bundled browser plugin is missing its skill entrypoint.'
     }
     if (-not (Test-Path $chromePluginRoot -PathType Container)) {
         throw 'Bundled Chrome plugin was not found in the portable package.'
@@ -457,7 +457,9 @@ const residualGateMatches = [];
 const allJavaScriptContent = [];
 let fastModeSelectorPatched = false;
 let bundledBrowserPluginsPatched = false;
+let bundledRuntimePluginsPatched = false;
 let browserUseDescriptorPatched = false;
+let bundledBrowserPluginDescriptorSeen = false;
 let windowsBrowserUseCapabilityPatched = false;
 let pluginsApiKeyNavPatched = false;
 let pluginsApiKeyRoutePatched = false;
@@ -470,16 +472,19 @@ for (const entry of javaScriptEntries) {
   allJavaScriptContent.push(content);
   fastModeSelectorPatched ||= content.includes('/*codex-offline:fast-mode-selector*/');
   bundledBrowserPluginsPatched ||= content.includes('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
+  bundledRuntimePluginsPatched ||= content.includes('/*codex-offline:bundled-runtime-plugins*/');
   windowsBrowserUseCapabilityPatched ||= content.includes('/*codex-offline:windows-browser-use-capability*/');
   pluginsApiKeyNavPatched ||= content.includes('/*codex-offline:plugins-api-key-nav*/');
   pluginsApiKeyRoutePatched ||= content.includes('/*codex-offline:plugins-api-key-route*/');
   browserUseDescriptorPatched ||=
     /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.Nn\([A-Za-z_$][\w$]*\.Dn\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/.test(content);
+  bundledBrowserPluginDescriptorSeen ||= browserUseDescriptorPatched;
   if (
     /forceReload:!0,installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>[A-Za-z_$][\w$]*\.inAppBrowserUseAllowed/.test(content) ||
     /forceReload:!0,(?:installWhenMissing:!0,)?name:lt,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>[A-Za-z_$][\w$]*\.externalBrowserUseAllowed&&/.test(content) ||
     /forceReload:!0,name:[A-Za-z_$][\w$]*\.On,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>/.test(content)
   ) {
+    bundledBrowserPluginDescriptorSeen = true;
     bundledBrowserPluginForceReloadResiduals.push(entry);
   }
   if (SETTINGS_ROUTE_BAD_PATTERN_RE.test(content)) {
@@ -548,9 +553,6 @@ if (hasDesktopFeatureAvailability && !windowsBrowserUseCapabilityPatched) {
   throw new Error('Windows Browser Use capability override is present but was not patched.');
 }
 
-if (!bundledBrowserPluginsPatched) {
-  throw new Error('Bundled browser plugin descriptor patch marker is missing.');
-}
 const hasPluginsApiKeyDisabledNavBranch = allJavaScriptContent.some(content =>
   /sidebarElectron\.pluginsDisabledTooltip[\s\S]{0,700}disabled:!0[\s\S]{0,700}sidebarElectron\.pluginsRouteNavLink/.test(content) ||
   /sidebarElectron\.pluginsRouteNavLink[\s\S]{0,700}disabled:!0[\s\S]{0,700}sidebarElectron\.pluginsDisabledTooltip/.test(content)
@@ -565,14 +567,20 @@ const hasPluginsApiKeyRouteFallback = allJavaScriptContent.some(content =>
 if (hasPluginsApiKeyRouteFallback && !pluginsApiKeyRoutePatched) {
   throw new Error('Plugins API-key page fallback branch is present but was not patched.');
 }
-if (!browserUseDescriptorPatched) {
-  throw new Error('Bundled browser-use descriptor was not patched for offline marketplace materialization.');
-}
 if (bundledBrowserPluginForceReloadResiduals.length > 0) {
   throw new Error(
     'Bundled browser plugin descriptors still force reload and may hit Windows file locks: ' +
     bundledBrowserPluginForceReloadResiduals.join(', ')
   );
+}
+if (bundledBrowserPluginDescriptorSeen && !bundledBrowserPluginsPatched) {
+  throw new Error('Bundled browser plugin descriptor patch marker is missing.');
+}
+if (bundledBrowserPluginDescriptorSeen && !browserUseDescriptorPatched) {
+  throw new Error('Bundled browser-use descriptor was not patched for offline marketplace materialization.');
+}
+if (!bundledRuntimePluginsPatched) {
+  throw new Error('Bundled runtime plugin materialization patch marker is missing.');
 }
 
 console.log(`[verify-offline-package] Verified app.asar patches in ${path.basename(asarPath)}`);

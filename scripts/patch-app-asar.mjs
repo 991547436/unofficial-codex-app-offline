@@ -89,6 +89,13 @@
  *    used offline. We disable that API-key-only lockout and keep the bundled
  *    Plugins route visible for offline builds.
  *
+ * 40. Keep offline runtime plugins in the materialized marketplace
+ *    The desktop runtime copies only enabled bundled plugin descriptors into
+ *    ~/.codex/.tmp/bundled-marketplaces/openai-bundled.  Office artifact
+ *    plugins are injected into the bundled marketplace during packaging, so
+ *    preserve those local entries even though the upstream app does not ship
+ *    desktop feature descriptors for them.
+ *
  * 8. Normalize Windows automation cwd paths
  *    The packaged Automations UI can persist selected project paths in
  *    `\\?\C:\...` form on Windows.  Automation execution later compares that
@@ -323,6 +330,49 @@ function patchBundledBrowserPlugins(filePaths, options) {
   return { patchedFiles, seen, alreadyCorrect };
 }
 
+function patchBundledRuntimeMarketplaceFilter(filePaths, options) {
+  const patchedFiles = [];
+  let seen = false;
+  let alreadyCorrect = false;
+
+  for (const filePath of filePaths) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const originalContent = content;
+
+    if (content.includes(options.patchMarker)) {
+      seen = true;
+      alreadyCorrect = true;
+      continue;
+    }
+
+    if (!options.filterRe.test(content)) continue;
+    seen = true;
+    content = content.replace(options.filterRe, (
+      _match,
+      functionName,
+      argName,
+      setName,
+      pluginNamesProperty,
+      pluginParam,
+    ) => (
+      `function ${functionName}(${argName}){` +
+      `let ${setName}=new Set(${argName}.${pluginNamesProperty});` +
+      `for(let _codexOfflinePluginName of ${options.pluginNamesJson})` +
+      `${setName}.add(_codexOfflinePluginName);` +
+      `return{...${argName}.marketplace,plugins:${argName}.marketplace.plugins.filter(` +
+      `${pluginParam}=>${setName}.has(${pluginParam}.name))}}` +
+      options.patchMarker
+    ));
+
+    if (content !== originalContent) {
+      fs.writeFileSync(filePath, content, 'utf8');
+      patchedFiles.push(filePath);
+    }
+  }
+
+  return { patchedFiles, seen, alreadyCorrect };
+}
+
 function countOccurrences(content, needle) {
   if (!needle) return 0;
 
@@ -367,6 +417,12 @@ function patchChromeBrowserClient(filePath) {
 
   let content = fs.readFileSync(filePath, 'utf8');
   let changed = false;
+  const nativePipeSymbols = {
+    bridgeGetter: null,
+    unavailableMessage: null,
+    platform: null,
+    pipePrefix: null,
+  };
   const removeStaleTimeoutPatch = (needle, replacement, message) => {
     if (content.includes(needle)) {
       content = content.replace(needle, replacement);
@@ -442,9 +498,14 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(nativePipeDirectPatchMarker)) {
     log('Chrome browser client native pipe direct path already patched.');
   } else if (content.includes(nativePipeFallbackPatchMarker)) {
-    const fallbackFirstCreateNeedle =
-      'static async create(e){let r=Wf();if(r!=null)try{let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}catch(n){if(!_codexOfflineShouldUseNativePipeFallback(e))throw n}if(_codexOfflineShouldUseNativePipeFallback(e)){let n=await _codexOfflineCreateNativePipeConnection(e);return new t(n)}throw new Error(Vf())}';
-    if (!content.includes(fallbackFirstCreateNeedle)) {
+    const fallbackFirstCreateNeedles = [
+      'static async create(e){let r=Wf();if(r!=null)try{let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}catch(n){if(!_codexOfflineShouldUseNativePipeFallback(e))throw n}if(_codexOfflineShouldUseNativePipeFallback(e)){let n=await _codexOfflineCreateNativePipeConnection(e);return new t(n)}throw new Error(Vf())}',
+      'static async create(e){if(_codexOfflineShouldUseNativePipeFallback(e)){let r=await _codexOfflineCreateNativePipeConnection(e);return new t(r)}let r=Wf();if(r!=null){let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}throw new Error(Vf())}',
+    ];
+    const fallbackFirstCreateNeedle = fallbackFirstCreateNeedles.find(
+      needle => content.includes(needle),
+    );
+    if (!fallbackFirstCreateNeedle) {
       throw new Error(
         'Could not locate Chrome browser-client native pipe fallback flow to upgrade.',
       );
@@ -454,15 +515,41 @@ function patchChromeBrowserClient(filePath) {
     changed = true;
     log('Chrome browser client native pipe fallback upgraded to direct Windows path.');
   } else {
-    const helperNeedle =
-      'function Wf(){let t=import.meta.__codexNativePipe;return t==null||typeof t.createConnection!="function"?null:t}';
+    const helperNeedleMatch = content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=import\.meta\.__codexNativePipe;return \2==null\|\|typeof \2\.createConnection!="function"\?null:\2\}/,
+    );
+    const unavailableMessageMatch = content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=import\.meta\.__codexNativePipeUnavailableMessage;return typeof \2=="string"&&\2\.length>0\?\2:"privileged native pipe bridge is not available; browser-client is not trusted"\}/,
+    );
+    const platformImportMatch = content.match(
+      /import [A-Za-z_$][\w$]*,\{platform as ([A-Za-z_$][\w$]*)\}from"node:os";/,
+    ) ?? content.match(
+      /import\{platform as ([A-Za-z_$][\w$]*)\}from"node:os";/,
+    );
+    const pipePrefixMatch = content.match(
+      /var ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)=>\2==="win32"\?"\\\\\\\\\.\\\\pipe\\\\codex-browser-use":"\/tmp\/codex-browser-use"/,
+    );
+    if (!helperNeedleMatch || !unavailableMessageMatch || !platformImportMatch || !pipePrefixMatch) {
+      throw new Error(
+        'Could not locate Chrome browser-client native pipe symbols to add Windows fallback.',
+      );
+    }
+
+    nativePipeSymbols.bridgeGetter = helperNeedleMatch[1];
+    nativePipeSymbols.unavailableMessage = unavailableMessageMatch[1];
+    nativePipeSymbols.platform = platformImportMatch[1];
+    nativePipeSymbols.pipePrefix = pipePrefixMatch[1];
+
+    const helperNeedle = helperNeedleMatch[0];
     const helperReplacement =
       helperNeedle +
-      'function _codexOfflineShouldUseNativePipeFallback(t){return hO()==="win32"&&typeof t=="string"&&t.startsWith("\\\\\\\\.\\\\pipe\\\\codex-browser-use")}' +
+      `function _codexOfflineShouldUseNativePipeFallback(t){return ${nativePipeSymbols.platform}()==="win32"&&typeof t=="string"&&t.startsWith(${nativePipeSymbols.pipePrefix}("win32"))}` +
       nativePipeHelpersWithoutTimeout +
       nativePipeFallbackPatchMarker;
     const createNeedle =
-      'static async create(e){let r=Wf();if(r!=null){let n=await r.createConnection(e);return new t(n)}throw new Error(Vf())}';
+      `static async create(e){let r=${nativePipeSymbols.bridgeGetter}();if(r!=null){let n=await r.createConnection(e);return new t(n)}throw new Error(${nativePipeSymbols.unavailableMessage}())}`;
+    const createReplacement =
+      `static async create(e){if(_codexOfflineShouldUseNativePipeFallback(e)){let r=await _codexOfflineCreateNativePipeConnection(e);return new t(r)}let r=${nativePipeSymbols.bridgeGetter}();if(r!=null){let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}throw new Error(${nativePipeSymbols.unavailableMessage}())}${nativePipeDirectPatchMarker}`;
 
     if (!content.includes(helperNeedle) || !content.includes(createNeedle)) {
       throw new Error(
@@ -472,7 +559,7 @@ function patchChromeBrowserClient(filePath) {
 
     content = content
       .replace(helperNeedle, helperReplacement)
-      .replace(createNeedle, nativePipeDirectCreateReplacement);
+      .replace(createNeedle, createReplacement);
     changed = true;
     log('Chrome browser client native pipe direct path patched.');
   }
@@ -482,19 +569,45 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(diagnosticsPatchMarker)) {
     log('Chrome browser client discovery diagnostics already patched.');
   } else {
-    const diagnosticsNeedle =
+    const legacyDiagnosticsNeedle =
       'let e=t,r=new Ac,n=p=>new Rc(p,r,Gr),{browsers:o,diagnostics:i}=await US(n),s=await HO(o),a=s.map(p=>new Tc(p.api,p.id,p.info));';
-    const diagnosticsReplacement =
+    const legacyDiagnosticsReplacement =
       'let e=t,r=new Ac,n=p=>new Rc(p,r,Gr),{browsers:o,diagnostics:i}=await US(n);' +
       `e.__codexBrowserUseDiagnostics=i;${diagnosticsPatchMarker}` +
       'let s=await HO(o),a=s.map(p=>new Tc(p.api,p.id,p.info));';
-    if (!content.includes(diagnosticsNeedle)) {
+    const currentDiagnosticsMatch = content.match(
+      /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*);try\{if\(([A-Za-z_$][\w$]*)\(\)==null\)throw new Error\(([A-Za-z_$][\w$]*)\(\)\);([A-Za-z_$][\w$]*)\(\);let ([A-Za-z_$][\w$]*)=new ([A-Za-z_$][\w$]*);\(\{browsers:([A-Za-z_$][\w$]*),diagnostics:([A-Za-z_$][\w$]*)\}=await ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)=>new ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\)\),([A-Za-z_$][\w$]*)=await ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\}/,
+    );
+
+    if (content.includes(legacyDiagnosticsNeedle)) {
+      content = content.replace(legacyDiagnosticsNeedle, legacyDiagnosticsReplacement);
+    } else if (currentDiagnosticsMatch) {
+      const [
+        diagnosticsNeedle,
+        globalsAlias,
+        globalsParam,
+        browsersVar,
+        diagnosticsVar,
+      ] = currentDiagnosticsMatch;
+      const filteredBrowsersVar = currentDiagnosticsMatch[19];
+      const diagnosticsReplacement = diagnosticsNeedle.replace(
+        `))),${filteredBrowsersVar}=`,
+        `)));${globalsAlias}.__codexBrowserUseDiagnostics=${diagnosticsVar};${diagnosticsPatchMarker}${filteredBrowsersVar}=`,
+      );
+      if (!diagnosticsReplacement.includes(diagnosticsPatchMarker)) {
+        throw new Error(
+          'Could not prepare Chrome browser-client discovery diagnostics replacement.',
+        );
+      }
+      content = content.replace(diagnosticsNeedle, diagnosticsReplacement);
+      void globalsParam;
+      void browsersVar;
+    } else {
       throw new Error(
         'Could not locate Chrome browser-client setup flow to expose discovery diagnostics.',
       );
     }
 
-    content = content.replace(diagnosticsNeedle, diagnosticsReplacement);
     changed = true;
     log('Chrome browser client discovery diagnostics patched.');
   }
@@ -504,18 +617,30 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(chromePipeFilterPatchMarker)) {
     log('Chrome browser client Windows Chrome pipe filter already patched.');
   } else {
-    const pipeListNeedle =
-      'SO=async()=>{let t="\\\\\\\\.\\\\pipe\\\\";return(await OS(t)).map(n=>BS.resolve(t,n)).filter(n=>n.startsWith(Zf))}';
-    const pipeListReplacement =
-      'SO=async()=>{let t="\\\\\\\\.\\\\pipe\\\\",e=(await OS(t)).map(n=>BS.resolve(t,n)).filter(n=>n.startsWith(Zf)),' +
-      'r=e.filter(n=>n.startsWith(Zf+"\\\\"));return(r.length>0?r:e)}' +
-      chromePipeFilterPatchMarker;
-    if (!content.includes(pipeListNeedle)) {
+    const pipeListMatch = content.match(
+      /([A-Za-z_$][\w$]*)=async\(\)=>\{let ([A-Za-z_$][\w$]*)="\\\\\\\\\.\\\\pipe\\\\";return\(await ([A-Za-z_$][\w$]*)\(\2\)\)\.map\(([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\.resolve\(\2,\4\)\)\.filter\(([A-Za-z_$][\w$]*)=>\6\.startsWith\(([A-Za-z_$][\w$]*)\)\)\}/,
+    );
+    if (!pipeListMatch) {
       throw new Error(
         'Could not locate Chrome browser-client Windows pipe listing flow.',
       );
     }
 
+    const [
+      pipeListNeedle,
+      listFunction,
+      rootVar,
+      readdirFunction,
+      entryVar,
+      pathModule,
+      pipeVar,
+      pipePrefixVar,
+    ] = pipeListMatch;
+    const pipeListReplacement =
+      `${listFunction}=async()=>{let ${rootVar}="\\\\\\\\.\\\\pipe\\\\",` +
+      `e=(await ${readdirFunction}(${rootVar})).map(${entryVar}=>${pathModule}.resolve(${rootVar},${entryVar})).filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar})),` +
+      `r=e.filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar}+"\\\\"));return(r.length>0?r:e)}` +
+      chromePipeFilterPatchMarker;
     content = content.replace(pipeListNeedle, pipeListReplacement);
     changed = true;
     log('Chrome browser client Windows Chrome pipe filter patched.');
@@ -526,22 +651,36 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(directSetupPatchMarker)) {
     log('Chrome browser client direct Windows pipe setup already patched.');
   } else {
-    const directSetupHelperNeedle =
-      'function _codexOfflineShouldUseNativePipeFallback(t){return hO()==="win32"&&typeof t=="string"&&t.startsWith("\\\\\\\\.\\\\pipe\\\\codex-browser-use")}';
+    const shouldUseFallbackMatch = content.match(
+      /function _codexOfflineShouldUseNativePipeFallback\(([A-Za-z_$][\w$]*)\)\{return ([A-Za-z_$][\w$]*)\(\)==="win32"&&typeof \1=="string"&&\1\.startsWith\(([^{}]+)\)\}/,
+    );
+    if (!shouldUseFallbackMatch) {
+      throw new Error(
+        'Could not locate Chrome browser-client native pipe fallback helper.',
+      );
+    }
+
+    const directSetupHelperNeedle = shouldUseFallbackMatch[0];
+    const platformFunction = shouldUseFallbackMatch[2];
     const directSetupHelperReplacement =
       directSetupHelperNeedle +
-      'function _codexOfflineCanUseNativePipeDirect(){return hO()==="win32"}';
-    const directSetupGuardNeedle =
-      'async function nae({globals:t}){if(Wf()==null)throw new Error(Vf());';
-    const directSetupGuardReplacement =
-      `async function nae({globals:t}){if(Wf()==null&&!_codexOfflineCanUseNativePipeDirect())throw new Error(Vf());${directSetupPatchMarker}`;
-
-    if (!content.includes(directSetupHelperNeedle) || !content.includes(directSetupGuardNeedle)) {
+      `function _codexOfflineCanUseNativePipeDirect(){return ${platformFunction}()==="win32"}`;
+    const directSetupGuardMatch = content.match(
+      /if\(([A-Za-z_$][\w$]*)\(\)==null\)throw new Error\(([A-Za-z_$][\w$]*)\(\)\);/,
+    );
+    if (!directSetupGuardMatch) {
       throw new Error(
         'Could not locate Chrome browser-client setup guard to enable direct Windows pipe setup.',
       );
     }
 
+    const [
+      directSetupGuardNeedle,
+      bridgeGetter,
+      unavailableMessage,
+    ] = directSetupGuardMatch;
+    const directSetupGuardReplacement =
+      `if(${bridgeGetter}()==null&&!_codexOfflineCanUseNativePipeDirect())throw new Error(${unavailableMessage}());${directSetupPatchMarker}`;
     content = content
       .replace(directSetupHelperNeedle, directSetupHelperReplacement)
       .replace(directSetupGuardNeedle, directSetupGuardReplacement);
@@ -578,17 +717,18 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(ambientNetworkPatchMarker)) {
     log('Chrome browser client ambient network default already patched.');
   } else {
-    const ambientNetworkNeedle =
-      'function Ps(){return globalThis.nodeRepl?.requestMeta?.[V2]===!0}';
-    const ambientNetworkReplacement =
-      `function Ps(){let t=globalThis.nodeRepl?.requestMeta?.[V2];return t===!1?!1:!0}${ambientNetworkPatchMarker}`;
-
-    if (!content.includes(ambientNetworkNeedle)) {
+    const ambientNetworkMatch = content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{return globalThis\.nodeRepl\?\.requestMeta\?\.\[([A-Za-z_$][\w$]*)\]===!0\}/,
+    );
+    if (!ambientNetworkMatch) {
       throw new Error(
         'Could not locate Chrome browser-client ambient network guard to default offline.',
       );
     }
 
+    const [ambientNetworkNeedle, ambientNetworkFunction, ambientNetworkHeader] = ambientNetworkMatch;
+    const ambientNetworkReplacement =
+      `function ${ambientNetworkFunction}(){let t=globalThis.nodeRepl?.requestMeta?.[${ambientNetworkHeader}];return t===!1?!1:!0}${ambientNetworkPatchMarker}`;
     content = content.replace(ambientNetworkNeedle, ambientNetworkReplacement);
     changed = true;
     log('Chrome browser client ambient network default patched.');
@@ -876,8 +1016,10 @@ try {
     'args:[`-c`,`windows.sandbox=\'unelevated\'`,`app-server`,`--analytics-default-enabled`]';
   const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER =
     '/*codex-offline:windows-browser-use-capability*/';
-  const WINDOWS_BROWSER_USE_CAPABILITY_RE =
+  const WINDOWS_BROWSER_USE_CAPABILITY_LEGACY_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return\s+\4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/;
+  const WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{((?:buildFlavor:[A-Za-z_$][\w$]*=[^,}]+,)?env:([A-Za-z_$][\w$]*)=[^,}]+,platform:([A-Za-z_$][\w$]*)=[^,}]+)\}=\{\}\)\{let ([A-Za-z_$][\w$]*)=\5===`win32`&&\4\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}:\2,/;
   // ── Patch 36: Keep bundled browser plugins in runtime marketplace ─────
   const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER =
     '/*codex-offline:bundled-browser-plugins-no-force-reload*/';
@@ -893,6 +1035,15 @@ try {
     /(\{forceReload:!0,name:([A-Za-z_$][\w$]*)\.On,isAvailable:\(\{buildFlavor:([A-Za-z_$][\w$]*),features:([A-Za-z_$][\w$]*)\}\)=>)(Jn\(\3\)&&\4\.externalBrowserUseAllowed)(\})/;
   const IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE =
     /\{installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.On,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
+  const BUNDLED_RUNTIME_PLUGIN_NAMES = [
+    'documents',
+    'spreadsheets',
+    'presentations',
+  ];
+  const BUNDLED_RUNTIME_MARKETPLACE_FILTER_PATCH_MARKER =
+    '/*codex-offline:bundled-runtime-plugins*/';
+  const BUNDLED_RUNTIME_MARKETPLACE_FILTER_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{let\s+([A-Za-z_$][\w$]*)=new Set\(\2\.(enabledPluginNames|marketplacePluginNames)\);return\{\.\.\.\2\.marketplace,plugins:\2\.marketplace\.plugins\.filter\(([A-Za-z_$][\w$]*)=>\3\.has\(\5\.name\)\)\}\}/;
 
   const mainBuildDir = path.join(tmpDir, '.vite', 'build');
   const mainBundleFiles = Array.from(new Set([
@@ -1107,16 +1258,28 @@ try {
       continue;
     }
 
-    if (!WINDOWS_BROWSER_USE_CAPABILITY_RE.test(content)) continue;
+    if (WINDOWS_BROWSER_USE_CAPABILITY_LEGACY_RE.test(content)) {
+      content = content.replace(
+        WINDOWS_BROWSER_USE_CAPABILITY_LEGACY_RE,
+        'function $1($2,{env:$3=process.env,platform:$4=process.platform}={}){' +
+          'return $4!==`win32`||$3.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?$2:' +
+          '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
+          'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
+          `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}}`,
+      );
+    } else if (WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE.test(content)) {
+      content = content.replace(
+        WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE,
+        'function $1($2,{$3}={}){' +
+          'let $6=$5===`win32`&&$4.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`?' +
+          '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
+          'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
+          `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}:$2,`,
+      );
+    } else {
+      continue;
+    }
 
-    content = content.replace(
-      WINDOWS_BROWSER_USE_CAPABILITY_RE,
-      'function $1($2,{env:$3=process.env,platform:$4=process.platform}={}){' +
-        'return $4!==`win32`||$3.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?$2:' +
-        '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
-        'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
-        `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}}`,
-    );
     fs.writeFileSync(filePath, content, 'utf8');
     windowsBrowserUseCapabilityPatched = true;
     windowsBrowserUseCapabilityPatchedFiles.push(path.relative(tmpDir, filePath));
@@ -1162,6 +1325,34 @@ try {
       'Bundled browser plugin descriptors are present in main bundles, but ' +
       'no supported patch pattern matched. @chrome may be filtered from the ' +
       'runtime marketplace in offline builds.',
+    );
+  }
+
+  const bundledRuntimeMarketplaceFilterPatch = patchBundledRuntimeMarketplaceFilter(
+    mainBundleFiles,
+    {
+      filterRe: BUNDLED_RUNTIME_MARKETPLACE_FILTER_RE,
+      patchMarker: BUNDLED_RUNTIME_MARKETPLACE_FILTER_PATCH_MARKER,
+      pluginNamesJson: JSON.stringify(BUNDLED_RUNTIME_PLUGIN_NAMES),
+    },
+  );
+
+  if (bundledRuntimeMarketplaceFilterPatch.patchedFiles.length > 0) {
+    log(
+      'Bundled runtime plugin materialization preserved for offline mode in ' +
+      `${bundledRuntimeMarketplaceFilterPatch.patchedFiles.map(filePath => path.relative(tmpDir, filePath)).join(', ')}.`,
+    );
+  } else if (bundledRuntimeMarketplaceFilterPatch.alreadyCorrect) {
+    log('Bundled runtime plugin materialization already patched.');
+  } else if (!bundledRuntimeMarketplaceFilterPatch.seen) {
+    warn(
+      'Bundled runtime marketplace filter was not found. ' +
+      'Office plugins may not be copied into the runtime marketplace.',
+    );
+  } else {
+    throw new Error(
+      'Bundled runtime marketplace filter was found but no supported patch ' +
+      'pattern matched. Office plugins may be filtered from offline installs.',
     );
   }
 
@@ -1395,7 +1586,7 @@ try {
   // merged into the plugins page. Replace inline gate calls with !0.
   const PLUGINS_BUNDLED_MARKETPLACE_GATE_ID_MARKER = '`588076040`';
   const PLUGINS_BUNDLED_MARKETPLACE_GATE_INLINE_RE =
-    /([,;]\s*\w+\s*=)\s*[$\w]+\(`588076040`\)/g;
+    /([,;}]\s*[$\w]+\s*=)\s*[$\w]+\(`588076040`\)/g;
   // ≥ 26.429.x: extracted to a standalone hook.
   const PLUGINS_BUNDLED_MARKETPLACE_GATE_FUNCTION_RE =
     /function\s+(\w+)\(\)\{return\s+[$\w]+\(`588076040`\)\}/;
