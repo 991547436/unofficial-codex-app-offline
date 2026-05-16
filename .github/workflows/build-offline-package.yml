@@ -27,7 +27,6 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'scripts/**'
-      - 'vendor/**'
   pull_request:
     branches:
       - main
@@ -40,7 +39,6 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'scripts/**'
-      - 'vendor/**'
 
 permissions:
   contents: write

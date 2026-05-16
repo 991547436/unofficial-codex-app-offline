@@ -81,6 +81,39 @@ function Get-FileSha256 {
     return (Get-FileHash -Algorithm SHA256 -Path $PathValue).Hash.ToLowerInvariant()
 }
 
+function Get-OptionalProperty {
+    param(
+        [Parameter(Mandatory = $false)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Get-RequiredProperty {
+    param(
+        [Parameter(Mandatory = $false)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $value = Get-OptionalProperty -Object $Object -Name $Name
+    if ($null -eq $value -or ([string]$value).Trim() -eq '') {
+        throw "$Context.$Name is required."
+    }
+
+    return $value
+}
+
 function Find-Iscc {
     $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 
@@ -163,15 +196,107 @@ function Get-ChromeExtensionConfig {
     return $config
 }
 
+function Resolve-OfflineRuntimePluginMarketplaceRoot {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$WorkRoot
+    )
+
+    $runtimePluginsConfig = Get-RequiredProperty -Object $Config -Name 'runtimePlugins' -Context 'config'
+    $primaryRuntimeConfig = Get-RequiredProperty -Object $runtimePluginsConfig -Name 'primaryRuntime' -Context 'config.runtimePlugins'
+    $source = [string](Get-RequiredProperty -Object $primaryRuntimeConfig -Name 'source' -Context 'config.runtimePlugins.primaryRuntime')
+
+    if ($source -ne 'archive') {
+        throw "Unsupported primary runtime plugin source '$source'."
+    }
+
+    $url = [string](Get-RequiredProperty -Object $primaryRuntimeConfig -Name 'url' -Context 'config.runtimePlugins.primaryRuntime')
+    $expectedSha256 = ([string](Get-RequiredProperty -Object $primaryRuntimeConfig -Name 'sha256' -Context 'config.runtimePlugins.primaryRuntime')).ToLowerInvariant()
+    $marketplacePath = [string](Get-RequiredProperty -Object $primaryRuntimeConfig -Name 'marketplacePath' -Context 'config.runtimePlugins.primaryRuntime')
+    $version = [string](Get-OptionalProperty -Object $primaryRuntimeConfig -Name 'version')
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        $version = 'runtime'
+    }
+
+    $runtimeWorkRoot = Join-Path $WorkRoot 'runtime-plugins'
+    $archiveRoot = Join-Path $runtimeWorkRoot $version
+    $archivePath = Join-Path $archiveRoot 'codex-primary-runtime.tar.xz'
+    $extractRoot = Join-Path $archiveRoot 'extract'
+    $marketplaceRoot = Join-Path $extractRoot $marketplacePath
+
+    New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+
+    $needsDownload = $true
+    if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+        $actualSha256 = Get-FileSha256 -PathValue $archivePath
+        if ($actualSha256 -eq $expectedSha256) {
+            $needsDownload = $false
+        }
+        else {
+            Remove-Item -LiteralPath $archivePath -Force
+        }
+    }
+
+    if ($needsDownload) {
+        Write-BuildTrace "Downloading Codex primary runtime $version."
+        $previousProgressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing
+        }
+        finally {
+            $ProgressPreference = $previousProgressPreference
+        }
+
+        $actualSha256 = Get-FileSha256 -PathValue $archivePath
+        if ($actualSha256 -ne $expectedSha256) {
+            throw "Downloaded Codex primary runtime hash mismatch. Expected $expectedSha256, got $actualSha256."
+        }
+    }
+
+    if (Test-Path -LiteralPath $extractRoot) {
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+
+    $tarCommand = Get-Command tar -ErrorAction SilentlyContinue
+    if ($null -eq $tarCommand) {
+        throw 'tar was not found. It is required to extract the Codex primary runtime archive.'
+    }
+
+    Write-BuildTrace "Extracting Codex primary runtime $version."
+    & $tarCommand.Source -xf $archivePath -C $extractRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to extract Codex primary runtime archive with tar exit code $LASTEXITCODE."
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $marketplaceRoot '.agents\plugins\marketplace.json') -PathType Leaf)) {
+        throw "Codex primary runtime marketplace was not found after extraction: $marketplaceRoot"
+    }
+
+    return [ordered]@{
+        source = $source
+        version = $version
+        url = $url
+        sha256 = $expectedSha256
+        marketplaceRoot = $marketplaceRoot
+    }
+}
+
 function Get-OfflineRuntimePluginSource {
     param(
-        [Parameter(Mandatory = $true)][string]$VendorRoot,
+        [Parameter(Mandatory = $true)][string]$MarketplaceRoot,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    $pluginRoot = Join-Path $VendorRoot $Name
+    $pluginRoot = Join-Path (Join-Path $MarketplaceRoot 'plugins') $Name
+    if (Test-Path -LiteralPath (Join-Path $pluginRoot '.codex-plugin\plugin.json') -PathType Leaf) {
+        return $pluginRoot
+    }
+
+    $pluginRoot = Join-Path $MarketplaceRoot $Name
     if (-not (Test-Path -LiteralPath $pluginRoot -PathType Container)) {
-        throw "Offline runtime plugin vendor root is missing: $pluginRoot"
+        throw "Offline runtime plugin source root is missing: $pluginRoot"
     }
 
     $directManifestPath = Join-Path $pluginRoot '.codex-plugin\plugin.json'
@@ -184,7 +309,7 @@ function Get-OfflineRuntimePluginSource {
             Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName '.codex-plugin\plugin.json') -PathType Leaf }
     )
     if ($candidates.Count -ne 1) {
-        throw "Expected exactly one vendored version for offline runtime plugin '$Name', found $($candidates.Count)."
+        throw "Expected exactly one offline runtime plugin version for '$Name', found $($candidates.Count)."
     }
 
     return $candidates[0].FullName
@@ -193,14 +318,13 @@ function Get-OfflineRuntimePluginSource {
 function Add-OfflineRuntimePlugins {
     param(
         [Parameter(Mandatory = $true)][string]$AppRoot,
-        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$MarketplaceSourceRoot,
         [Parameter(Mandatory = $true)][string[]]$PluginNames
     )
 
     $marketplaceRoot = Join-Path $AppRoot 'resources\plugins\openai-bundled'
     $manifestPath = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
     $pluginsRoot = Join-Path $marketplaceRoot 'plugins'
-    $vendorRoot = Join-Path $RepoRoot 'vendor\plugins\openai-primary-runtime'
 
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "Bundled plugin marketplace manifest was not found: $manifestPath"
@@ -210,7 +334,7 @@ function Add-OfflineRuntimePlugins {
 
     $pluginInfo = @()
     foreach ($name in $PluginNames) {
-        $sourceRoot = Get-OfflineRuntimePluginSource -VendorRoot $vendorRoot -Name $name
+        $sourceRoot = Get-OfflineRuntimePluginSource -MarketplaceRoot $MarketplaceSourceRoot -Name $name
         $destinationRoot = Join-Path $pluginsRoot $name
         if (Test-Path -LiteralPath $destinationRoot) {
             Remove-Item -LiteralPath $destinationRoot -Recurse -Force
@@ -254,7 +378,6 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $configFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $ConfigPath
 $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
-$offlineRuntimePluginNames = @('documents', 'spreadsheets', 'presentations')
 
 $workRoot = if ($WorkRoot) {
     [System.IO.Path]::GetFullPath($WorkRoot)
@@ -308,9 +431,15 @@ Copy-Item -Path (Join-Path $scriptRoot 'repair-chrome-host.ps1') -Destination (J
 Copy-Item -Path (Join-Path $scriptRoot 'setup-codex-offline.ps1') -Destination (Join-Path $internalRoot 'setup-codex-offline.ps1') -Force
 
 Write-BuildTrace 'Bundling offline runtime plugins.'
+$primaryRuntimePluginSource = Resolve-OfflineRuntimePluginMarketplaceRoot -Config $config -WorkRoot $workRoot
+$runtimePluginsConfig = Get-RequiredProperty -Object $config -Name 'runtimePlugins' -Context 'config'
+$primaryRuntimeConfig = Get-RequiredProperty -Object $runtimePluginsConfig -Name 'primaryRuntime' -Context 'config.runtimePlugins'
+$offlineRuntimePluginNames = @((
+        Get-RequiredProperty -Object $primaryRuntimeConfig -Name 'plugins' -Context 'config.runtimePlugins.primaryRuntime'
+    ) | ForEach-Object { [string]$_ })
 $offlineRuntimePluginInfo = Add-OfflineRuntimePlugins `
     -AppRoot (Join-Path $internalRoot 'app') `
-    -RepoRoot $repoRoot `
+    -MarketplaceSourceRoot $primaryRuntimePluginSource.marketplaceRoot `
     -PluginNames $offlineRuntimePluginNames
 Write-BuildTrace 'Offline runtime plugins bundled.'
 
@@ -459,6 +588,7 @@ $buildInfo = [ordered]@{
         defaultInstallProfile = $defaultInstallProfile
         defaultInstallPaths = $defaultInstallPaths
     }
+    primaryRuntime = $primaryRuntimePluginSource
     offlineRuntimePlugins = $offlineRuntimePluginInfo
 }
 
@@ -545,6 +675,7 @@ $buildMetadata = [ordered]@{
     artifactDirectoryRelative = Get-RelativePath -BasePath $repoRoot -PathValue $artifactRoot
     generatedAt = (Get-Date).ToString('o')
     appSource = $appSourceInfo
+    primaryRuntime = $primaryRuntimePluginSource
     assets = $assetInfo
 }
 

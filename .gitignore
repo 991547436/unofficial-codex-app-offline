@@ -1,6 +1,7 @@
 build/
 dist/
 node_modules/
+vendor/plugins/openai-primary-runtime/
 .tmp-home/
 .tmp-test/
 test-version.txt

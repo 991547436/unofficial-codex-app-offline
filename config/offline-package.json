@@ -24,6 +24,20 @@
       "destination": "build/work/skills-official"
     }
   },
+  "runtimePlugins": {
+    "primaryRuntime": {
+      "source": "archive",
+      "version": "26.426.12240",
+      "url": "https://persistent.oaistatic.com/codex-primary-runtime/26.426.12240/codex-primary-runtime-win32-x64-26.426.12240.tar.xz",
+      "sha256": "1ea47342401b0966b1ea496eeb4149708d7518e6fafecab75888fbeb4c867b9a",
+      "marketplacePath": "codex-primary-runtime/plugins/openai-primary-runtime",
+      "plugins": [
+        "documents",
+        "spreadsheets",
+        "presentations"
+      ]
+    }
+  },
   "packaging": {
     "outputDir": "dist/offline",
     "portableZip": true,

@@ -135,8 +135,7 @@ CODEX_SKILL_SOURCE_DIR=\\company-nas\shared-skills
 - Node.js ≥ 24
 - PowerShell 7+
 - (Optional) [Inno Setup 6](https://jrsoftware.org/isinfo.php) for generating `setup.exe`
-- This repo must include the vendored offline runtime plugins under `vendor\plugins\openai-primary-runtime\`
-  (`documents`, `spreadsheets`, `presentations`), because the build injects those local plugin copies into the bundled offline marketplace.
+- Network access to download the pinned Codex primary runtime archive configured in `config\offline-package.json`. The build extracts only the runtime plugin marketplace needed for Documents / Spreadsheets / Presentations.
 
 #### Build
 
@@ -229,7 +228,7 @@ Artifacts are written to `dist/offline/<release-name>/`.
 3. `app.asar` is patched so Codex runs outside the MSIX container, and the Electron asar integrity fuse is disabled.
 4. The matching Chrome browser extension CRX is downloaded and unpacked into `_internal\chrome-extension`.
 5. Official skills are fetched from [`openai/skills`](https://github.com/openai/skills), bundled as a local seed, and tagged with a small default setup profile.
-6. Vendored runtime plugins from `vendor\plugins\openai-primary-runtime` are copied into the bundled offline marketplace so the Plugins page can offer local installs for Documents / Spreadsheets / Presentations.
+6. The pinned Codex primary runtime archive is downloaded, hash-verified, and extracted under the build work directory; its Documents / Spreadsheets / Presentations plugins are copied into the bundled offline marketplace so the Plugins page can offer local installs.
 7. Everything is staged into a portable directory, then zipped / compiled into an installer.
 
 #### CI / CD
@@ -408,8 +407,7 @@ CODEX_SKILL_SOURCE_DIR=\\company-nas\shared-skills
 - Node.js ≥ 24
 - PowerShell 7+
 - （可选）[Inno Setup 6](https://jrsoftware.org/isinfo.php)，用于生成 `setup.exe`
-- 仓库中必须包含 `vendor\plugins\openai-primary-runtime\` 下的离线 runtime 插件副本
-  （`documents`、`spreadsheets`、`presentations`），因为构建时会把这些本地插件注入到离线 marketplace 里。
+- 需要联网下载 `config\offline-package.json` 中固定的 Codex primary runtime archive。构建只会提取 Documents / Spreadsheets / Presentations 所需的 runtime plugin marketplace。
 
 #### 构建
 
@@ -502,7 +500,7 @@ pwsh -NoProfile -File ./scripts/build-offline-package.ps1
 3. 补丁 `app.asar` 使 Codex 可在 MSIX 容器外运行，并关闭 Electron asar 完整性校验。
 4. 下载匹配的 Chrome 浏览器扩展 CRX，并解包到 `_internal\chrome-extension`。
 5. 从 [`openai/skills`](https://github.com/openai/skills) 拉取官方 skills，作为本地 seed 打包，并标记小型默认 Setup profile。
-6. 将 `vendor\plugins\openai-primary-runtime` 下 vendored 的 runtime 插件复制进离线 marketplace，使 Plugins 页面可以本地安装 Documents / Spreadsheets / Presentations。
+6. 下载固定版本的 Codex primary runtime archive，校验 hash 后解压到 build work 目录，并把其中的 Documents / Spreadsheets / Presentations 插件复制进离线 marketplace，使 Plugins 页面可以本地安装。
 7. 所有内容 stage 到便携目录，然后打包 ZIP / 编译安装器。
 
 #### CI / CD
