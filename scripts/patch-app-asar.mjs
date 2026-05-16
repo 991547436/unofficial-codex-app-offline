@@ -1723,23 +1723,47 @@ try {
   const PERSONALITY_GATE_UNPATCHED_RE =
     /[$\w]+\(`1444479692`\)/;
 
-  // ── Patch 32: Keep cloud-backed Remote Connections gated ───────────────
+  // ── Patch 32: Enable Remote Connections for offline builds ─────────────
   //
-  // Gate 1042620455 controls Codex Mobile / remote control connections.  The
-  // onboarding flow calls ChatGPT cloud endpoints for MFA and enrolled client
-  // checks, so the offline package intentionally leaves this gate intact
-  // instead of exposing a setup flow that cannot complete offline.
+  // Gate 1042620455 controls remote Codex instance connections.  A
+  // standalone function in the app-server-manager-hooks chunk exports the
+  // gate result.  Replace to always return !0.
   const REMOTE_CONNECTIONS_GATE_ID_MARKER = '`1042620455`';
   const REMOTE_CONNECTIONS_GATE_FUNCTION_RE =
     /function\s+(\w+)\(\)\{return\s+[$\w]+\(`1042620455`\)\}/;
+  const REMOTE_CONNECTIONS_GATE_INLINE_RE =
+    /([,;]\s*\w+\s*=)\s*[$\w]+\(`1042620455`\)/g;
 
-  // ── Patch 33: Keep Remote Connections feature flag gated ───────────────
+  // ── Patch 33: Enable Remote Connections feature flag for offline ─────────
   //
   // Gate 4114442250 is used in the app-server-manager-hooks feature check
   // function alongside the config check for features.remote_connections.
+  // Replace inline gate calls with !0.
   const REMOTE_CONNECTIONS_FEATURE_GATE_ID_MARKER = '`4114442250`';
+  const REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE =
+    /([,;]\s*\w+\s*=)\s*[$\w]+\(`4114442250`\)/g;
   const REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE =
     /[$\w]+\(`4114442250`\)/;
+
+  // ── Patch 33b: Route Codex Mobile auth refresh through desktop login ────
+  //
+  // Codex Mobile's remote-control security check maps 401 responses through
+  // chatgpt-token-auth.browser, which only redirects on chatgpt.com origins.
+  // In the Electron desktop shell that helper is a no-op, so online users see
+  // the generic "Couldn't check security requirements" error instead of the
+  // existing desktop ChatGPT sign-in flow.  Import the desktop login action and
+  // retry the original remote-control request after login completes.
+  const CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER =
+    '/*codex-offline:codex-mobile-auth-relogin*/';
+  const CODEX_MOBILE_SETUP_CHUNK_RE = /^codex-mobile-setup-flow-.*\.js$/;
+  const ONBOARDING_LOGIN_CHUNK_RE = /^onboarding-login-content-.*\.js$/;
+  const CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE =
+    /import\{t as he\}from"\.\/chatgpt-token-auth\.browser-[^"]+\.js";/;
+  const CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER =
+    'async function De(e){try{return await e()}catch(e){throw e instanceof C?e.status===404?new ve:e.status===403?new ye(e.message):e.status===401?(he(),new X(`ChatGPT auth is required to load remote control environments.`)):Error(`Remote control request failed (${e.status}): ${e.message}`):e}}';
+  const CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_REPLACEMENT =
+    'async function De(e){try{return await e()}catch(t){throw t instanceof C?t.status===404?new ve:t.status===403?new ye(t.message):t.status===401?await codexOfflineRemoteControlRelogin(e):Error(`Remote control request failed (${t.status}): ${t.message}`):t}}async function codexOfflineRemoteControlRelogin(e){if(he())throw new X(`ChatGPT auth is required to load remote control environments.`);try{let t=await codexOfflineChatGptLogin({useStreamlinedLogin:!0});t.authUrl&&O.dispatchMessage(`open-in-browser`,{url:t.authUrl});let n=await t.completion;if(n.success)return await e()}catch{}throw new X(`ChatGPT auth is required to load remote control environments.`)}' +
+    CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER;
 
   // ── Patch 34: Enable Artifact Electron native functionality ────────────
   //
@@ -1805,6 +1829,9 @@ try {
 
   const assetsDir = path.join(tmpDir, 'webview', 'assets');
   if (fs.existsSync(assetsDir)) {
+    const assetFiles = fs.readdirSync(assetsDir);
+    const onboardingLoginChunk = assetFiles.find(file => ONBOARDING_LOGIN_CHUNK_RE.test(file));
+
     let i18nCount = 0;
     let i18nAlreadyCorrect = false;
     let localeSourceCount = 0;
@@ -1877,15 +1904,19 @@ try {
     let chronicleGateSeen = false;
     let personalityGateCount = 0;
     let personalityGateSeen = false;
+    let remoteConnectionsGatePatched = false;
     let remoteConnectionsGateSeen = false;
+    let remoteConnectionsFeatureGateCount = 0;
     let remoteConnectionsFeatureGateSeen = false;
+    let codexMobileAuthReloginSeen = false;
+    let codexMobileAuthReloginPatched = false;
     let artifactElectronGatePatched = false;
     let artifactElectronGateSeen = false;
     let fastModeGatePatched = false;
     let fastModeGateSeen = false;
     let fastModeGateAlreadyCorrect = false;
 
-    for (const file of fs.readdirSync(assetsDir)) {
+    for (const file of assetFiles) {
       if (!file.endsWith('.js')) continue;
       const filePath = path.join(assetsDir, file);
       let content = fs.readFileSync(filePath, 'utf8');
@@ -1982,6 +2013,10 @@ try {
         originalContent.includes(REMOTE_CONNECTIONS_GATE_ID_MARKER);
       remoteConnectionsFeatureGateSeen ||=
         REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE.test(originalContent);
+      codexMobileAuthReloginSeen ||=
+        originalContent.includes('/wham/remote/control/mfa_requirement') &&
+        originalContent.includes('ChatGPT auth is required to load remote control environments.');
+      codexMobileAuthReloginPatched ||= originalContent.includes(CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER);
       artifactElectronGateSeen ||=
         ARTIFACT_ELECTRON_GATE_FUNCTION_RE.test(originalContent) ||
         originalContent.includes(ARTIFACT_ELECTRON_GATE_ID_MARKER);
@@ -2542,6 +2577,67 @@ try {
         }
       }
 
+      // Patch 32: Remote Connections
+      if (REMOTE_CONNECTIONS_GATE_FUNCTION_RE.test(content)) {
+        content = content.replace(REMOTE_CONNECTIONS_GATE_FUNCTION_RE, 'function $1(){return!0}');
+        remoteConnectionsGatePatched = true;
+        modified = true;
+      } else {
+        const inlineMatches = content.match(REMOTE_CONNECTIONS_GATE_INLINE_RE);
+        if (inlineMatches) {
+          content = content.replaceAll(REMOTE_CONNECTIONS_GATE_INLINE_RE, '$1!0');
+          remoteConnectionsGatePatched = true;
+          modified = true;
+        }
+      }
+
+      // Patch 33: Remote Connections feature flag
+      {
+        const inlineMatches = content.match(REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE);
+        if (inlineMatches) {
+          content = content.replaceAll(REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE, '$1!0');
+          remoteConnectionsFeatureGateCount += inlineMatches.length;
+          modified = true;
+        }
+      }
+
+      // Patch 33b: Codex Mobile desktop ChatGPT relogin
+      if (
+        CODEX_MOBILE_SETUP_CHUNK_RE.test(file) &&
+        content.includes('/wham/remote/control/mfa_requirement') &&
+        !content.includes(CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER)
+      ) {
+        if (onboardingLoginChunk == null) {
+          throw new Error(
+            'Codex Mobile remote-control auth path is present, but the onboarding ' +
+            'login chunk was not found.',
+          );
+        }
+        if (!CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE.test(content)) {
+          throw new Error(
+            'Codex Mobile remote-control auth path is present, but the ChatGPT ' +
+            'token-auth import pattern no longer matches.',
+          );
+        }
+        if (!content.includes(CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER)) {
+          throw new Error(
+            'Codex Mobile remote-control auth path is present, but the 401 handler ' +
+            'pattern no longer matches.',
+          );
+        }
+
+        content = content.replace(
+          CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE,
+          `$&import{r as codexOfflineChatGptLogin}from"./${onboardingLoginChunk}";`,
+        );
+        content = content.replace(
+          CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER,
+          CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_REPLACEMENT,
+        );
+        codexMobileAuthReloginPatched = true;
+        modified = true;
+      }
+
       // Patch 34: Artifact Electron native functionality
       if (ARTIFACT_ELECTRON_GATE_FUNCTION_RE.test(content)) {
         content = content.replace(ARTIFACT_ELECTRON_GATE_FUNCTION_RE, 'function $1(){return!0}');
@@ -3027,16 +3123,40 @@ try {
       );
     }
 
-    if (remoteConnectionsGateSeen) {
-      log('Remote connections gate 1042620455 left intact because Codex Mobile is cloud-backed.');
-    } else {
+    if (remoteConnectionsGatePatched) {
+      log('Remote connections gate bypassed for offline mode.');
+    } else if (!remoteConnectionsGateSeen) {
       log('Remote connections gate 1042620455 is not present in this app version. No patch needed.');
+    } else {
+      warn(
+        'Remote connections gate 1042620455 is still present, but no supported ' +
+        'patch pattern matched.',
+      );
     }
 
-    if (remoteConnectionsFeatureGateSeen) {
-      log('Remote connections feature gate 4114442250 left intact because Codex Mobile is cloud-backed.');
-    } else {
+    if (remoteConnectionsFeatureGateCount > 0) {
+      log(
+        'Remote connections feature flag gate bypassed for offline mode ' +
+        `(${remoteConnectionsFeatureGateCount} occurrence(s)).`,
+      );
+    } else if (!remoteConnectionsFeatureGateSeen) {
       log('Remote connections feature gate 4114442250 is not present in this app version. No patch needed.');
+    } else {
+      warn(
+        'Remote connections feature gate 4114442250 is still present, but no ' +
+        'supported patch pattern matched.',
+      );
+    }
+
+    if (codexMobileAuthReloginPatched) {
+      log('Codex Mobile remote-control 401 path now uses desktop ChatGPT login.');
+    } else if (!codexMobileAuthReloginSeen) {
+      log('Codex Mobile remote-control auth path is not present in this app version. No patch needed.');
+    } else {
+      throw new Error(
+        'Codex Mobile remote-control auth path is present, but desktop ChatGPT ' +
+        'relogin was not patched.',
+      );
     }
 
     if (artifactElectronGatePatched) {

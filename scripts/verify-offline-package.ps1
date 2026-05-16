@@ -396,8 +396,8 @@ const SLASH_UI_MARKERS = [
   'composer.personalitySlashCommand.title',
   'composer.planSlashCommand.title',
 ];
-const REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
-const REMOTE_CONTROL_CLOUD_GATE_ID = '1042620455';
+const CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
+const CODEX_MOBILE_AUTH_RELOGIN_MARKER = '/*codex-offline:codex-mobile-auth-relogin*/';
 const KNOWN_RAW_GATE_IDS = [
   '4166894088',
   '3075919032',
@@ -465,8 +465,8 @@ let bundledBrowserPluginDescriptorSeen = false;
 let windowsBrowserUseCapabilityPatched = false;
 let pluginsApiKeyNavPatched = false;
 let pluginsApiKeyRoutePatched = false;
-let hasRemoteControlMfaEndpoint = false;
-let remoteControlCloudGateSeen = false;
+let codexMobileRemoteControlMfaEndpointSeen = false;
+let codexMobileAuthReloginPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
 const settingsRouteResiduals = [];
 const localeSourceResiduals = [];
@@ -480,8 +480,8 @@ for (const entry of javaScriptEntries) {
   windowsBrowserUseCapabilityPatched ||= content.includes('/*codex-offline:windows-browser-use-capability*/');
   pluginsApiKeyNavPatched ||= content.includes('/*codex-offline:plugins-api-key-nav*/');
   pluginsApiKeyRoutePatched ||= content.includes('/*codex-offline:plugins-api-key-route*/');
-  hasRemoteControlMfaEndpoint ||= content.includes(REMOTE_CONTROL_MFA_ENDPOINT);
-  remoteControlCloudGateSeen ||= content.includes('`' + REMOTE_CONTROL_CLOUD_GATE_ID + '`');
+  codexMobileRemoteControlMfaEndpointSeen ||= content.includes(CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT);
+  codexMobileAuthReloginPatched ||= content.includes(CODEX_MOBILE_AUTH_RELOGIN_MARKER);
   browserUseDescriptorPatched ||=
     /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.Nn\([A-Za-z_$][\w$]*\.Dn\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/.test(content);
   bundledBrowserPluginDescriptorSeen ||= browserUseDescriptorPatched;
@@ -588,12 +588,9 @@ if (bundledBrowserPluginDescriptorSeen && !browserUseDescriptorPatched) {
 if (!bundledRuntimePluginsPatched) {
   throw new Error('Bundled runtime plugin materialization patch marker is missing.');
 }
-if (hasRemoteControlMfaEndpoint && !remoteControlCloudGateSeen) {
-  throw new Error(
-    'Codex Mobile still calls the ChatGPT remote-control MFA endpoint, but its cloud-backed gate was not left intact.'
-  );
+if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
+  throw new Error('Codex Mobile remote-control auth relogin patch marker is missing.');
 }
-
 console.log(`[verify-offline-package] Verified app.asar patches in ${path.basename(asarPath)}`);
 '@
 
