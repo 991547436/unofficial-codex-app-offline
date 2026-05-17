@@ -761,7 +761,7 @@ if [ -f "$SCRIPT_DIR/start-web.mjs" ]; then
 else
   exec node gateway/dist/server.js
 fi
-'@ | Set-Content -Path $launcherPath -Encoding ASCII -NoNewline
+'@ -replace "`r`n", "`n" | Set-Content -Path $launcherPath -Encoding ASCII -NoNewline
 
     # 通用 Web 包：一份内容，三个平台通用，只区分启动脚本
     # start.sh → Linux / macOS，start.bat → Windows
