@@ -67,7 +67,28 @@ class LocalCodexBundleProvider {
   ensure({ projectRoot }: { projectRoot: string }): EnsureOfficialBundleResult {
     const cache = this.createCache(projectRoot);
     const manifest = cache.readManifest();
-    const layout = this.scanner.find({ cachedAsarPath: manifest?.sourceAsarPath });
+
+    let layout = null;
+    try {
+      layout = this.scanner.find({ cachedAsarPath: manifest?.sourceAsarPath });
+    } catch (scannerError) {
+      // 跨平台 Web 包没有 app.asar——如果缓存已有 webview 就直接复用
+      if (manifest && cache.isWebviewReady()) {
+        this.logger.info("未找到 app.asar，但缓存 webview 可用，使用预提取的前端");
+        return {
+          bundleDir: cache.bundleDir,
+          webviewDir: cache.webviewDir,
+          manifest,
+          sourceAppPath: manifest.sourceAppPath || "",
+          sourceAsarPath: manifest.sourceAsarPath || "",
+          codexBinaryPath: null,
+          version: manifest.version || "unknown",
+          build: manifest.build || "",
+        };
+      }
+      throw scannerError;
+    }
+
     const sourceInfo = this.sourceInfoReader.read(layout);
     const reason = cache.refreshReason(manifest, sourceInfo);
 
