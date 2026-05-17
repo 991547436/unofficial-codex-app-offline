@@ -41,6 +41,7 @@
   "packaging": {
     "outputDir": "dist/offline",
     "portableZip": true,
+    "crossPlatformWeb": true,
     "setupExe": true,
     "skillArchive": true,
     "sourceExportArchive": false

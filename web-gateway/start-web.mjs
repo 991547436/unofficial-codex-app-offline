@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -17,6 +17,18 @@ const codexAppServerPath = path.join(
 );
 const serverPath = path.join(webRoot, "gateway", "dist", "server.js");
 const bundleCacheDir = path.join(webRoot, "cache", "official-bundle");
+
+/** 检测 PATH 上是否存在可用的 codex 命令（CLI 模式）。 */
+function hasCliCodex() {
+  try {
+    execFileSync(process.platform === "win32" ? "where" : "which", ["codex"], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const host = process.env.HOST || "127.0.0.1";
 const port = process.env.PORT || "3737";
@@ -87,10 +99,28 @@ function waitForHealth(url, timeoutMs = 30_000) {
   });
 }
 
-requireFile(appAsarPath, "Codex app.asar");
-requireFile(codexExePath, "Codex executable");
-requireFile(codexAppServerPath, "Codex app-server executable");
 requireFile(serverPath, "Codex web gateway");
+
+// 确定 app-server 命令：用户显式设置 > 打包二进制 > CLI > 报错
+const userCmd = process.env.CODEX_APP_SERVER_CMD || "";
+const hasBundledBinary = existsSync(codexAppServerPath);
+const useCli = !userCmd && !hasBundledBinary && hasCliCodex();
+
+if (!userCmd) {
+  if (hasBundledBinary) {
+    // 传统模式：使用打包的 codex 二进制
+    requireFile(appAsarPath, "Codex app.asar");
+    requireFile(codexExePath, "Codex executable");
+  } else if (hasCliCodex()) {
+    // CLI 模式：使用 PATH 上的 codex 命令
+    console.log("[codex-web] 检测到 codex CLI，使用 CLI 模式");
+  } else {
+    fail(
+      "未找到 Codex 后端。请安装 Codex CLI（npm install -g @openai/codex），" +
+      "或将 Codex Desktop 放置到 " + appRoot
+    );
+  }
+}
 
 if ((host === "0.0.0.0" || host === "::") && !process.env.CODEX_WEB_PASSWORD) {
   fail("CODEX_WEB_PASSWORD is required when HOST listens beyond localhost.");
@@ -100,10 +130,14 @@ const env = {
   ...process.env,
   HOST: host,
   PORT: port,
-  CODEX_DESKTOP_APP_PATH: process.env.CODEX_DESKTOP_APP_PATH || appRoot,
+  CODEX_DESKTOP_APP_PATH:
+    process.env.CODEX_DESKTOP_APP_PATH ||
+    (existsSync(appRoot) ? appRoot : ""),
   CODEX_APP_SERVER_CMD:
-    process.env.CODEX_APP_SERVER_CMD ||
-    `${quoteShellArg(codexAppServerPath)} app-server --listen stdio://`,
+    userCmd ||
+    (useCli
+      ? "codex app-server --listen stdio://"
+      : `${quoteShellArg(codexAppServerPath)} app-server --listen stdio://`),
   CODEX_WEB_OFFICIAL_BUNDLE_DIR:
     process.env.CODEX_WEB_OFFICIAL_BUNDLE_DIR || bundleCacheDir,
   CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE:

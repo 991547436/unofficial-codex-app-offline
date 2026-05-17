@@ -704,6 +704,90 @@ if ($config.packaging.portableZip) {
     $assets.Add($portableZip) | Out-Null
 }
 
+if ($config.packaging.crossPlatformWeb) {
+    Write-BuildTrace 'Building cross-platform Web packages.'
+    $crossWebDir = Join-Path $workRoot 'cross-platform-web'
+    if (Test-Path $crossWebDir) { Remove-Item -Recurse -Force $crossWebDir }
+    New-Item -ItemType Directory -Force -Path $crossWebDir | Out-Null
+
+    $webRoot = Join-Path $crossWebDir $releaseBase
+    New-Item -ItemType Directory -Force -Path $webRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $webRoot 'gateway\dist') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $webRoot 'cache\official-bundle\webview') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $webRoot 'web-shell') | Out-Null
+
+    # Gateway compiled artifacts
+    Copy-Item -Path (Join-Path $repoRoot 'web-gateway\gateway\dist\*') -Destination (Join-Path $webRoot 'gateway\dist') -Recurse -Force
+    Copy-Item -Path (Join-Path $repoRoot 'web-gateway\start-web.mjs') -Destination $webRoot -Force
+    Copy-Item -Path (Join-Path $repoRoot 'web-gateway\package.json') -Destination $webRoot -Force
+
+    # web-shell
+    Copy-Item -Path (Join-Path $repoRoot 'web-gateway\web-shell\*') -Destination (Join-Path $webRoot 'web-shell') -Recurse -Force
+
+    # webview (from already-extracted cache)
+    $webviewSrc = Join-Path $internalRoot 'web\cache\official-bundle\webview'
+    if (Test-Path $webviewSrc) {
+        Copy-Item -Path "$webviewSrc\*" -Destination (Join-Path $webRoot 'cache\official-bundle\webview') -Recurse -Force
+    }
+    else {
+        Write-Warning "Webview not found at $webviewSrc — cross-platform Web package will lack UI assets"
+    }
+
+    # Version
+    $version | Set-Content -Path (Join-Path $webRoot 'VERSION') -Encoding ASCII
+
+    # Universal launcher script
+    $launcherPath = Join-Path $webRoot 'start.sh'
+    @'
+#!/bin/bash
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+if [ ! -d "node_modules" ]; then
+  echo "[codex-web] Installing dependencies..."
+  npm install --omit=dev --no-audit --no-fund
+fi
+export HOST="${HOST:-127.0.0.1}"
+export PORT="${PORT:-3737}"
+export CODEX_WEB_OFFICIAL_BUNDLE_DIR="${CODEX_WEB_OFFICIAL_BUNDLE_DIR:-$SCRIPT_DIR/cache/official-bundle}"
+echo "[codex-web] Codex Web Gateway on $(uname -s)"
+echo "[codex-web] http://${HOST}:${PORT}"
+if [ -f "$SCRIPT_DIR/start-web.mjs" ]; then
+  exec node "$SCRIPT_DIR/start-web.mjs"
+else
+  exec node gateway/dist/server.js
+fi
+'@ | Set-Content -Path $launcherPath -Encoding ASCII -NoNewline
+
+    # 通用 Web 包：一份内容，三个平台通用，只区分启动脚本
+    # start.sh → Linux / macOS，start.bat → Windows
+    $startBat = Join-Path $webRoot 'start.bat'
+    @'
+@echo off
+setlocal
+where node >nul 2>nul
+if errorlevel 1 (echo Node.js was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
+where codex >nul 2>nul
+if errorlevel 1 (echo Codex CLI was not found. Install with: npm install -g @openai/codex && pause && exit /b 1)
+if not exist "node_modules\" (
+  echo [codex-web] Installing dependencies...
+  call npm install --omit=dev --no-audit --no-fund
+)
+set HOST=%HOST%
+if "%HOST%"=="" set HOST=127.0.0.1
+set PORT=%PORT%
+if "%PORT%"=="" set PORT=3737
+echo [codex-web] Codex Web Gateway
+echo [codex-web] http://%HOST%:%PORT%
+node start-web.mjs
+'@ | Set-Content -Path $startBat -Encoding ASCII -NoNewline
+
+    $webZip = Join-Path $artifactRoot ('{0}-web.zip' -f $releaseBase)
+    Compress-Archive -Path $webRoot -DestinationPath $webZip -Force
+    $assets.Add($webZip) | Out-Null
+    Write-BuildTrace "Cross-platform Web package: $webZip"
+}
+
 if ($config.packaging.skillArchive) {
     $skillsZip = Join-Path $artifactRoot ('{0}-skills.zip' -f $releaseBase)
     Compress-Archive -Path (Join-Path $internalRoot 'seed/codex-home') -DestinationPath $skillsZip -Force
