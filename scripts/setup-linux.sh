@@ -15,6 +15,11 @@ echo -e "${CYAN}║   Codex Web Gateway — Linux 安装向导    ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
+if [ "$(id -u)" = "0" ]; then
+  echo -e "${YELLOW}注意：检测到以 root 运行。建议使用普通用户安装，或确保了解风险。${NC}"
+  echo ""
+fi
+
 # ── 1. 检查基础依赖 ──
 echo -e "${YELLOW}[1/6]${NC} 检查系统依赖..."
 
@@ -101,6 +106,8 @@ if [ "$(ls -1 "$INSTALL_DIR" | wc -l)" = "1" ] && [ -d "$INSTALL_DIR/$(ls -1 "$I
   mv "$INSTALL_DIR/$INNER"/* "$INSTALL_DIR/"
   rmdir "$INSTALL_DIR/$INNER"
 fi
+# 修复 Windows 构建可能引入的 CRLF 换行符
+find "$INSTALL_DIR" -name '*.sh' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 rm -f "$DL_FILE"
 echo -e "  ${GREEN}✓${NC}"
 
