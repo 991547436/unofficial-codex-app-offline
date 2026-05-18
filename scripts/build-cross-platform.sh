@@ -8,6 +8,11 @@ WEBVIEW_SRC="${2:?}"
 OUTPUT_DIR="${3:?}"
 VERSION="${4:?}"
 
+GATEWAY_DIR="$(cd "$GATEWAY_DIR" && pwd)"
+WEBVIEW_SRC="$(cd "$WEBVIEW_SRC" && pwd)"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+
 RELEASE_NAME="codex-web-v${VERSION}"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
@@ -42,6 +47,7 @@ mkdir -p "$PKG/web-shell"
 # gateway 编译产物 + 源码
 cp -r "$GATEWAY_DIR/gateway/dist/"* "$PKG/gateway/dist/"
 cp "$GATEWAY_DIR/package.json" "$PKG/"
+cp "$GATEWAY_DIR/package-lock.json" "$PKG/"
 cp "$GATEWAY_DIR/start-web.mjs" "$PKG/"
 
 # web-shell（登录页 + polyfill）
@@ -84,7 +90,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 # 首次运行：安装依赖
-if [ ! -d "node_modules" ]; then
+if ! node -e 'for (const dep of Object.keys(require("./package.json").dependencies || {})) require.resolve(dep)' >/dev/null 2>&1; then
   echo "[codex-web] 首次运行，安装依赖..."
   npm install --omit=dev --no-audit --no-fund
 fi
@@ -113,11 +119,13 @@ chmod +x "$PKG/start.sh"
 cat > "$PKG/start.bat" << 'BATLAUNCHER'
 @echo off
 setlocal
+cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 (echo Node.js was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
 where codex >nul 2>nul
 if errorlevel 1 (echo Codex CLI was not found. Install with: npm install -g @openai/codex && pause && exit /b 1)
-if not exist "node_modules\" (
+node -e "for (const dep of Object.keys(require('./package.json').dependencies || {})) require.resolve(dep)" >nul 2>nul
+if errorlevel 1 (
   echo [codex-web] Installing dependencies...
   call npm install --omit=dev --no-audit --no-fund
 )
@@ -135,7 +143,31 @@ echo ""
 echo "--- 4/4 打包 ---"
 ARCHIVE="$OUTPUT_DIR/${RELEASE_NAME}-web.zip"
 mkdir -p "$OUTPUT_DIR"
-(cd "$BUILD_DIR" && zip -qr "$ARCHIVE" "$RELEASE_NAME")
+if command -v zip >/dev/null 2>&1; then
+  (cd "$BUILD_DIR" && zip -qr "$ARCHIVE" "$RELEASE_NAME")
+elif command -v python3 >/dev/null 2>&1; then
+  (cd "$BUILD_DIR" && python3 - "$RELEASE_NAME" "$ARCHIVE" << 'PYZIP'
+import os
+import sys
+import zipfile
+
+source_root, archive_path = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for current_root, _, files in os.walk(source_root):
+        for file_name in files:
+            file_path = os.path.join(current_root, file_name)
+            archive_name = os.path.relpath(file_path, ".")
+            entry = zipfile.ZipInfo.from_file(file_path, archive_name)
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            if os.access(file_path, os.X_OK):
+                entry.external_attr = (0o100755 << 16)
+            archive.writestr(entry, open(file_path, "rb").read())
+PYZIP
+)
+else
+  echo "ERROR: zip or python3 is required to create $ARCHIVE" >&2
+  exit 1
+fi
 echo "  → $(du -h "$ARCHIVE" | cut -f1)  $ARCHIVE"
 
 echo ""

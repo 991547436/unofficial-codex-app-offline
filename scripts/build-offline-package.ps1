@@ -194,6 +194,7 @@ function Add-WebGatewayRuntime {
         'web-shell\codex-bridge-polyfill.js',
         'node_modules\express\package.json',
         'node_modules\ws\package.json',
+        'node_modules\smol-toml\package.json',
         'node_modules\@electron\asar\package.json'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $destinationRoot $requiredPath) -PathType Leaf)) {
@@ -720,6 +721,7 @@ if ($config.packaging.crossPlatformWeb) {
     Copy-Item -Path (Join-Path $repoRoot 'web-gateway\gateway\dist\*') -Destination (Join-Path $webRoot 'gateway\dist') -Recurse -Force
     Copy-Item -Path (Join-Path $repoRoot 'web-gateway\start-web.mjs') -Destination $webRoot -Force
     Copy-Item -Path (Join-Path $repoRoot 'web-gateway\package.json') -Destination $webRoot -Force
+    Copy-Item -Path (Join-Path $repoRoot 'web-gateway\package-lock.json') -Destination $webRoot -Force
 
     # web-shell
     Copy-Item -Path (Join-Path $repoRoot 'web-gateway\web-shell\*') -Destination (Join-Path $webRoot 'web-shell') -Recurse -Force
@@ -753,7 +755,7 @@ cd "$SCRIPT_DIR"
 if [ -f "$SCRIPT_DIR/.env" ]; then
   set -a; source "$SCRIPT_DIR/.env"; set +a
 fi
-if [ ! -d "node_modules" ]; then
+if ! node -e 'for (const dep of Object.keys(require("./package.json").dependencies || {})) require.resolve(dep)' >/dev/null 2>&1; then
   echo "[codex-web] Installing dependencies..."
   npm install --omit=dev --no-audit --no-fund
 fi
@@ -772,14 +774,16 @@ fi
     # 通用 Web 包：一份内容，三个平台通用，只区分启动脚本
     # start.sh → Linux / macOS，start.bat → Windows
     $startBat = Join-Path $webRoot 'start.bat'
-    @'
+@'
 @echo off
 setlocal
+cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 (echo Node.js was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
 where codex >nul 2>nul
 if errorlevel 1 (echo Codex CLI was not found. Install with: npm install -g @openai/codex && pause && exit /b 1)
-if not exist "node_modules\" (
+node -e "for (const dep of Object.keys(require('./package.json').dependencies || {})) require.resolve(dep)" >nul 2>nul
+if errorlevel 1 (
   echo [codex-web] Installing dependencies...
   call npm install --omit=dev --no-audit --no-fund
 )
