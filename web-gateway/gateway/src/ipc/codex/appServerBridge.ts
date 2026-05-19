@@ -75,7 +75,7 @@ function createAppServerBridge(deps) {
 
   function isOptionalAppDirectoryFailure(error) {
     const message = error instanceof Error ? error.message : String(error);
-    return /failed to list apps|connectors\/directory\/list|status 403 forbidden/i.test(message);
+    return /failed to list apps|connectors\/directory\/list|status 403 forbidden|app-server request timed out .*app\/list/i.test(message);
   }
 
   /** 转发业务请求到 app-server，并统一记录失败日志。 */

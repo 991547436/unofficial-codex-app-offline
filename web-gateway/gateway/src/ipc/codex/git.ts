@@ -498,6 +498,23 @@ function createGitIpcHandlers(deps) {
     }
   }
 
+  function codexWorktreesForPayload(payload) {
+    const target = resolveGitTargetPath(payload);
+    if (!target) return { worktrees: [] };
+    const gitRoot = findGitRoot(target);
+    if (!gitRoot) return { worktrees: [] };
+    return {
+      worktrees: [
+        {
+          path: gitRoot,
+          root: gitRoot,
+          branch: currentGitBranchForRoot(gitRoot),
+          isMainWorktree: true,
+        },
+      ],
+    };
+  }
+
   /** 解析 git status --porcelain 输出为 renderer 更容易消费的结构。 */
   function parseGitStatusLines(lines) {
     return lines
@@ -626,6 +643,8 @@ function createGitIpcHandlers(deps) {
         return gitStatusSummaryForPayload(params);
       case "submodule-paths":
         return gitSubmodulePathsForPayload(params);
+      case "codex-worktrees":
+        return codexWorktreesForPayload(params);
       case "recent-branches":
       case "search-branches": {
         const result = recentBranchesForPayload(params);

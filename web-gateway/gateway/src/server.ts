@@ -286,10 +286,8 @@ function readBody(req) {
   });
 }
 
-function officialAssetPatchQuery(authToken = "") {
-  const params = [OFFICIAL_ASSET_PATCH_QUERY];
-  if (!PERSIST_AUTH_TOKEN && authToken) params.push(`token=${encodeURIComponent(authToken)}`);
-  return params.join("&");
+function officialAssetPatchQuery() {
+  return OFFICIAL_ASSET_PATCH_QUERY;
 }
 
 function authenticatedScriptSrc(src, authToken = "") {
@@ -578,7 +576,6 @@ function sendUnauthorized(req, res) {
 /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
 function cacheControlForRequestPath(reqPath) {
   if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
-  if (shouldPatchOfficialAsset(reqPath)) return "no-store";
   if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
   if (reqPath.startsWith("/official/")) return "public, max-age=3600";
   return "no-store";

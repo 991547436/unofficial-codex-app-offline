@@ -359,8 +359,45 @@ async function accountInfoFromCodexAccount(callAppServer, payload) {
   };
 }
 
-/** 调真实 /wham/accounts/check，不再返回 mock 账号数据。 */
+/** 用 app-server 的本地账号状态快速构造 /wham/accounts/check，避免刷新时阻塞真实后端探测。 */
 async function buildWhamAccountsCheck(callAppServer, logger) {
+  let accountResult = null;
+  try {
+    accountResult = await callAppServer("account/read", {});
+  } catch (error) {
+    logger && logger.warn("[wham] account/read fallback failed", error);
+  }
+  const account =
+    accountResult && typeof accountResult === "object" && accountResult.account
+      ? accountResult.account
+      : null;
+  if (account && typeof account === "object") {
+    const email = typeof account.email === "string" ? account.email : "";
+    const id =
+      (typeof account.accountId === "string" && account.accountId) ||
+      (typeof account.account_id === "string" && account.account_id) ||
+      (typeof account.id === "string" && account.id) ||
+      email ||
+      "local";
+    return {
+      accounts: [
+        {
+          id,
+          email,
+          account: {
+            id,
+            email,
+            account_user_role: "member",
+            plan_type:
+              (typeof account.planType === "string" && account.planType) ||
+              (typeof account.plan === "string" && account.plan) ||
+              null,
+          },
+        },
+      ],
+    };
+  }
+
   try {
     return await fetchChatgptBackendJson(callAppServer, "/wham/accounts/check");
   } catch (error) {

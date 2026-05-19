@@ -209,6 +209,10 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     1_000,
     parsePositiveNumberEnv("CODEX_WEB_APP_SERVER_CACHEABLE_REQUEST_TIMEOUT_MS", 15 * 1000)
   );
+  const APP_DIRECTORY_REQUEST_TIMEOUT_MS = Math.max(
+    500,
+    parsePositiveNumberEnv("CODEX_WEB_APP_DIRECTORY_REQUEST_TIMEOUT_MS", 2 * 1000)
+  );
   // fresh TTL：在这段时间内直接返回缓存，同时后台可按需刷新。
   const CACHEABLE_METHOD_TTLS_MS = new Map([
     ["account/read", 30 * 1000],
@@ -407,6 +411,11 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     if (!CACHEABLE_METHOD_TTLS_MS.has(method)) return false;
     if (params && typeof params === "object" && params.forceReload) return false;
     return true;
+  }
+
+  function timeoutMsForRequest(method, key) {
+    if (!key) return undefined;
+    return method === "app/list" ? APP_DIRECTORY_REQUEST_TIMEOUT_MS : CACHEABLE_REQUEST_TIMEOUT_MS;
   }
 
   /** 删除某个 method 的所有缓存和正在进行的同类请求。 */
@@ -885,7 +894,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
         return client.request(
           method,
           normalizedParams,
-          key ? { timeoutMs: CACHEABLE_REQUEST_TIMEOUT_MS } : undefined
+          key ? { timeoutMs: timeoutMsForRequest(method, key) } : undefined
         );
       })();
       const tracked = key

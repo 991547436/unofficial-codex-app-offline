@@ -73,9 +73,32 @@ cat > "$PKG/cache/official-bundle/manifest.json" << EOF
 }
 EOF
 
-# ── 3. 生成启动脚本 ──────────────────────────────────────
+# ── 3. 生成管理脚本 ──────────────────────────────────────
 echo ""
-echo "--- 3/5 生成启动脚本 ---"
+echo "--- 3/5 生成管理脚本 ---"
+
+cat > "$PKG/install.sh" << 'INSTALLER'
+#!/bin/bash
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+if ! command -v node >/dev/null 2>&1; then
+  echo "[codex-web] Node.js was not found. Install Node.js 18+ from https://nodejs.org"
+  exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "[codex-web] npm was not found. Install Node.js 18+ from https://nodejs.org"
+  exit 1
+fi
+if ! command -v codex >/dev/null 2>&1; then
+  echo "[codex-web] Codex CLI was not found. Install with: npm install -g @openai/codex"
+  exit 1
+fi
+echo "[codex-web] Installing gateway dependencies..."
+npm install --omit=dev --no-audit --no-fund --ignore-scripts
+node -e 'for (const dep of Object.keys(require("./package.json").dependencies || {})) require.resolve(dep)'
+echo "[codex-web] Install complete."
+INSTALLER
 
 cat > "$PKG/start.sh" << 'LAUNCHER'
 #!/bin/bash
@@ -89,10 +112,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   set -a; source "$SCRIPT_DIR/.env"; set +a
 fi
 
-# 首次运行：安装依赖
 if ! node -e 'for (const dep of Object.keys(require("./package.json").dependencies || {})) require.resolve(dep)' >/dev/null 2>&1; then
-  echo "[codex-web] 首次运行，安装依赖..."
-  npm install --omit=dev --no-audit --no-fund
+  echo "[codex-web] Dependencies are not installed. Run: bash install.sh"
+  exit 1
 fi
 
 export HOST="${HOST:-127.0.0.1}"
@@ -112,22 +134,98 @@ else
 fi
 LAUNCHER
 
-echo "${VERSION}" > "$PKG/VERSION"
-chmod +x "$PKG/start.sh"
+cat > "$PKG/stop.sh" << 'STOPPER'
+#!/bin/bash
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+PORT="${PORT:-3737}"
+PIDS=""
+if command -v lsof >/dev/null 2>&1; then
+  PIDS="$(lsof -ti "tcp:${PORT}" 2>/dev/null || true)"
+elif command -v fuser >/dev/null 2>&1; then
+  PIDS="$(fuser "${PORT}/tcp" 2>/dev/null || true)"
+else
+  echo "[codex-web] Install lsof or psmisc/fuser to stop by port, or stop the node process manually."
+  exit 1
+fi
+if [ -z "$PIDS" ]; then
+  echo "[codex-web] No gateway process is listening on port ${PORT}."
+  exit 0
+fi
+echo "[codex-web] Stopping gateway on port ${PORT}: ${PIDS}"
+kill $PIDS
+STOPPER
 
-# Windows 启动脚本（内容跟 .bat 一致，放在同一个包里）
+cat > "$PKG/status.sh" << 'STATUS'
+#!/bin/bash
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-3737}"
+CHECK_HOST="$HOST"
+if [ "$CHECK_HOST" = "0.0.0.0" ]; then
+  CHECK_HOST="127.0.0.1"
+fi
+URL="http://${CHECK_HOST}:${PORT}/api/health"
+if command -v curl >/dev/null 2>&1; then
+  if curl -fsS "$URL" >/dev/null; then
+    echo "[codex-web] running: $URL"
+  else
+    echo "[codex-web] not responding: $URL"
+    exit 1
+  fi
+else
+  node -e "require('http').get('$URL', r => { process.exit(r.statusCode >= 200 && r.statusCode < 300 ? 0 : 1) }).on('error', () => process.exit(1))"
+  echo "[codex-web] running: $URL"
+fi
+STATUS
+
+echo "${VERSION}" > "$PKG/VERSION"
+chmod +x "$PKG"/*.sh
+
+cat > "$PKG/install.bat" << 'BATINSTALLER'
+@echo off
+setlocal
+cd /d "%~dp0"
+where node >nul 2>nul
+if errorlevel 1 (echo Node.js was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
+where npm >nul 2>nul
+if errorlevel 1 (echo npm was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
+where codex >nul 2>nul
+if errorlevel 1 (echo Codex CLI was not found. Install with: npm install -g @openai/codex && pause && exit /b 1)
+echo [codex-web] Installing gateway dependencies...
+call npm install --omit=dev --no-audit --no-fund --ignore-scripts
+if errorlevel 1 (echo [codex-web] dependency installation failed && pause && exit /b 1)
+node -e "for (const dep of Object.keys(require('./package.json').dependencies || {})) require.resolve(dep)"
+if errorlevel 1 (echo [codex-web] dependency verification failed && pause && exit /b 1)
+echo [codex-web] Install complete.
+pause
+BATINSTALLER
+
 cat > "$PKG/start.bat" << 'BATLAUNCHER'
 @echo off
 setlocal
 cd /d "%~dp0"
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+)
 where node >nul 2>nul
 if errorlevel 1 (echo Node.js was not found. Install Node.js 18+ from https://nodejs.org && pause && exit /b 1)
 where codex >nul 2>nul
 if errorlevel 1 (echo Codex CLI was not found. Install with: npm install -g @openai/codex && pause && exit /b 1)
 node -e "for (const dep of Object.keys(require('./package.json').dependencies || {})) require.resolve(dep)" >nul 2>nul
 if errorlevel 1 (
-  echo [codex-web] Installing dependencies...
-  call npm install --omit=dev --no-audit --no-fund
+  echo [codex-web] Dependencies are not installed. Run install.bat first.
+  pause
+  exit /b 1
 )
 set HOST=%HOST%
 if "%HOST%"=="" set HOST=127.0.0.1
@@ -138,9 +236,32 @@ echo [codex-web] http://%HOST%:%PORT%
 node start-web.mjs
 BATLAUNCHER
 
+cat > "$PKG/stop.bat" << 'BATSTOPPER'
+@echo off
+setlocal
+cd /d "%~dp0"
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+)
+if "%PORT%"=="" set PORT=3737
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$port=[int]$env:PORT; $listeners=Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue; if(-not $listeners){ Write-Host '[codex-web] No gateway process is listening on port' $port; exit 0 }; foreach($l in $listeners){ Write-Host '[codex-web] Stopping PID' $l.OwningProcess 'on port' $port; Stop-Process -Id $l.OwningProcess -Force -ErrorAction SilentlyContinue }"
+BATSTOPPER
+
+cat > "$PKG/status.bat" << 'BATSTATUS'
+@echo off
+setlocal
+cd /d "%~dp0"
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+)
+if "%HOST%"=="" set HOST=127.0.0.1
+if "%PORT%"=="" set PORT=3737
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$hostName=$env:HOST; if($hostName -eq '0.0.0.0'){ $hostName='127.0.0.1' }; $url='http://'+$hostName+':'+$env:PORT+'/api/health'; try { $r=Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 3; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ Write-Host '[codex-web] running:' $url; exit 0 } } catch {}; Write-Host '[codex-web] not responding:' $url; exit 1"
+BATSTATUS
+
 # ── 4. 打包 ────────────────────────────────────────────
 echo ""
-echo "--- 4/4 打包 ---"
+echo "--- 4/5 打包 ---"
 ARCHIVE="$OUTPUT_DIR/${RELEASE_NAME}-web.zip"
 mkdir -p "$OUTPUT_DIR"
 if command -v zip >/dev/null 2>&1; then

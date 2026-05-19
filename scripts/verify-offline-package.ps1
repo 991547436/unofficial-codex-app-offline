@@ -51,6 +51,24 @@ $storeExportAssets = @($metadataAssets | Where-Object { $_.fileName -like '*-sto
 $checksumAssets = @($metadataAssets | Where-Object { $_.fileName -eq 'SHA256SUMS.txt' })
 $crossPlatformWebEnabled = $null -ne $config.packaging.PSObject.Properties['crossPlatformWeb'] -and [bool]$config.packaging.crossPlatformWeb
 
+$linuxSetupPath = Join-Path $repoRoot 'scripts\setup-linux.sh'
+$linuxSetupContent = Get-Content -Path $linuxSetupPath -Raw
+foreach ($needle in @(
+    'install|start|stop|status|restart|update',
+    'CODEX_WEB_INSTALL_DIR',
+    'manage_gateway',
+    'update_gateway',
+    'download_latest_web_zip',
+    'install_gateway_deps',
+    'sudo systemctl "$command" "$SERVICE_NAME"',
+    'UPDATE_DIR="$(mktemp -d)"',
+    '[ "$(basename "$item")" = ".env" ] && continue'
+)) {
+    if (-not $linuxSetupContent.Contains($needle)) {
+        throw "Linux setup script is missing expected management marker: $needle"
+    }
+}
+
 if ($config.packaging.portableZip -and $portableAssets.Count -ne 1) {
     throw "Expected exactly one portable zip asset, found $($portableAssets.Count)."
 }
@@ -222,6 +240,65 @@ try {
         }
     }
 
+    $webGatewayChatgptBackendPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\chatgptBackend.js'
+    $webGatewayChatgptBackendContent = Get-Content -Path $webGatewayChatgptBackendPath -Raw
+    foreach ($needle in @('account/read', 'account_user_role', '/wham/accounts/check')) {
+        if (-not $webGatewayChatgptBackendContent.Contains($needle)) {
+            throw "Web gateway ChatGPT backend is missing expected local account-check marker: $needle"
+        }
+    }
+
+    $webGatewayAppServerPath = Join-Path $portableRoot '_internal\web\gateway\dist\codex-app-server.js'
+    $webGatewayAppServerContent = Get-Content -Path $webGatewayAppServerPath -Raw
+    foreach ($needle in @('CODEX_WEB_APP_DIRECTORY_REQUEST_TIMEOUT_MS', 'APP_DIRECTORY_REQUEST_TIMEOUT_MS')) {
+        if (-not $webGatewayAppServerContent.Contains($needle)) {
+            throw "Web gateway app-server client is missing expected plugin-directory timeout marker: $needle"
+        }
+    }
+
+    $webGatewayBridgePath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\appServerBridge.js'
+    $webGatewayBridgeContent = Get-Content -Path $webGatewayBridgePath -Raw
+    foreach ($needle in @('app-server request timed out', 'app/list unavailable')) {
+        if (-not $webGatewayBridgeContent.Contains($needle)) {
+            throw "Web gateway app-server bridge is missing expected plugin-directory fallback marker: $needle"
+        }
+    }
+
+    $webGatewayServerPath = Join-Path $portableRoot '_internal\web\gateway\dist\server.js'
+    $webGatewayServerContent = Get-Content -Path $webGatewayServerPath -Raw
+    foreach ($needle in @('codex-web-worked-for=1', 'max-age=31536000, immutable')) {
+        if (-not $webGatewayServerContent.Contains($needle)) {
+            throw "Web gateway server is missing expected official asset cache marker: $needle"
+        }
+    }
+    if ($webGatewayServerContent.Contains('if (shouldPatchOfficialAsset(reqPath)) return "no-store"')) {
+        throw 'Web gateway server still disables browser cache for patched official JS assets.'
+    }
+
+    $webGatewayGitPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\git.js'
+    $webGatewayGitContent = Get-Content -Path $webGatewayGitPath -Raw
+    foreach ($needle in @('codex-worktrees', 'isMainWorktree')) {
+        if (-not $webGatewayGitContent.Contains($needle)) {
+            throw "Web gateway git worker is missing expected worktree marker: $needle"
+        }
+    }
+
+    $webGatewayAutomationsPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\automations.js'
+    $webGatewayAutomationsContent = Get-Content -Path $webGatewayAutomationsPath -Raw
+    foreach ($needle in @('AUTOMATION_BACKEND_REQUIRED_ERROR', 'webControlOnly', 'schedulerBackend')) {
+        if (-not $webGatewayAutomationsContent.Contains($needle)) {
+            throw "Web gateway automations handler is missing expected Desktop-backend marker: $needle"
+        }
+    }
+
+    $webGatewayIpcPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\GatewayCodexIpcPort.js'
+    $webGatewayIpcContent = Get-Content -Path $webGatewayIpcPath -Raw
+    foreach ($needle in @('callAutomationBackend', 'automation-create', 'automation-run-now')) {
+        if (-not $webGatewayIpcContent.Contains($needle)) {
+            throw "Web gateway IPC is missing expected automation backend-forward marker: $needle"
+        }
+    }
+
     if ($crossPlatformWebEnabled) {
         $webZipPath = Join-Path $artifactRoot $webAssets[0].fileName
         if (-not (Test-Path $webZipPath)) {
@@ -239,8 +316,14 @@ try {
 
         foreach ($relativePath in @(
             'start-web.mjs',
+            'install.sh',
             'start.sh',
+            'stop.sh',
+            'status.sh',
+            'install.bat',
             'start.bat',
+            'stop.bat',
+            'status.bat',
             'package.json',
             'package-lock.json',
             'gateway\dist\server.js',
@@ -251,6 +334,138 @@ try {
         )) {
             if (-not (Test-Path (Join-Path $webRoot $relativePath) -PathType Leaf)) {
                 throw "Web zip is missing required file: $relativePath"
+            }
+        }
+
+        $webZipChatgptBackendPath = Join-Path $webRoot 'gateway\dist\ipc\codex\chatgptBackend.js'
+        $webZipChatgptBackendContent = Get-Content -Path $webZipChatgptBackendPath -Raw
+        foreach ($needle in @('account/read', 'account_user_role', '/wham/accounts/check')) {
+            if (-not $webZipChatgptBackendContent.Contains($needle)) {
+                throw "Web zip ChatGPT backend is missing expected local account-check marker: $needle"
+            }
+        }
+
+        $webZipAppServerPath = Join-Path $webRoot 'gateway\dist\codex-app-server.js'
+        $webZipAppServerContent = Get-Content -Path $webZipAppServerPath -Raw
+        foreach ($needle in @('CODEX_WEB_APP_DIRECTORY_REQUEST_TIMEOUT_MS', 'APP_DIRECTORY_REQUEST_TIMEOUT_MS')) {
+            if (-not $webZipAppServerContent.Contains($needle)) {
+                throw "Web zip app-server client is missing expected plugin-directory timeout marker: $needle"
+            }
+        }
+
+        $webZipBridgePath = Join-Path $webRoot 'gateway\dist\ipc\codex\appServerBridge.js'
+        $webZipBridgeContent = Get-Content -Path $webZipBridgePath -Raw
+        foreach ($needle in @('app-server request timed out', 'app/list unavailable')) {
+            if (-not $webZipBridgeContent.Contains($needle)) {
+                throw "Web zip app-server bridge is missing expected plugin-directory fallback marker: $needle"
+            }
+        }
+
+        $webZipServerPath = Join-Path $webRoot 'gateway\dist\server.js'
+        $webZipServerContent = Get-Content -Path $webZipServerPath -Raw
+        foreach ($needle in @('codex-web-worked-for=1', 'max-age=31536000, immutable')) {
+            if (-not $webZipServerContent.Contains($needle)) {
+                throw "Web zip gateway server is missing expected official asset cache marker: $needle"
+            }
+        }
+        if ($webZipServerContent.Contains('if (shouldPatchOfficialAsset(reqPath)) return "no-store"')) {
+            throw 'Web zip gateway server still disables browser cache for patched official JS assets.'
+        }
+
+        $webZipGitPath = Join-Path $webRoot 'gateway\dist\ipc\codex\git.js'
+        $webZipGitContent = Get-Content -Path $webZipGitPath -Raw
+        foreach ($needle in @('codex-worktrees', 'isMainWorktree')) {
+            if (-not $webZipGitContent.Contains($needle)) {
+                throw "Web zip git worker is missing expected worktree marker: $needle"
+            }
+        }
+
+        $webZipAutomationsPath = Join-Path $webRoot 'gateway\dist\ipc\codex\automations.js'
+        $webZipAutomationsContent = Get-Content -Path $webZipAutomationsPath -Raw
+        foreach ($needle in @('AUTOMATION_BACKEND_REQUIRED_ERROR', 'webControlOnly', 'schedulerBackend')) {
+            if (-not $webZipAutomationsContent.Contains($needle)) {
+                throw "Web zip automations handler is missing expected Desktop-backend marker: $needle"
+            }
+        }
+
+        $webZipGatewayIpcPath = Join-Path $webRoot 'gateway\dist\ipc\codex\GatewayCodexIpcPort.js'
+        $webZipGatewayIpcContent = Get-Content -Path $webZipGatewayIpcPath -Raw
+        foreach ($needle in @('callAutomationBackend', 'automation-create', 'automation-run-now')) {
+            if (-not $webZipGatewayIpcContent.Contains($needle)) {
+                throw "Web zip gateway IPC is missing expected automation backend-forward marker: $needle"
+            }
+        }
+
+        foreach ($shellScriptName in @('install.sh', 'start.sh', 'stop.sh', 'status.sh')) {
+            $shellScriptPath = Join-Path $webRoot $shellScriptName
+            $shellScriptBytes = [System.IO.File]::ReadAllBytes($shellScriptPath)
+            for ($i = 0; $i -lt ($shellScriptBytes.Length - 1); $i++) {
+                if ($shellScriptBytes[$i] -eq 13 -and $shellScriptBytes[$i + 1] -eq 10) {
+                    throw "Web zip $shellScriptName must use LF line endings, not CRLF."
+                }
+            }
+        }
+
+        $webInstallShContent = Get-Content -Path (Join-Path $webRoot 'install.sh') -Raw
+        foreach ($needle in @('npm install --omit=dev --no-audit --no-fund --ignore-scripts', 'require.resolve(dep)', 'Install complete')) {
+            if (-not $webInstallShContent.Contains($needle)) {
+                throw "Web zip install.sh is missing expected install marker: $needle"
+            }
+        }
+
+        $webStartShPath = Join-Path $webRoot 'start.sh'
+        $webStartShContent = Get-Content -Path $webStartShPath -Raw
+        foreach ($needle in @('Run: bash install.sh', 'CODEX_WEB_OFFICIAL_BUNDLE_DIR', 'exec node')) {
+            if (-not $webStartShContent.Contains($needle)) {
+                throw "Web zip start.sh is missing expected start-only marker: $needle"
+            }
+        }
+        if ($webStartShContent.Contains('npm install --omit=dev') -or $webStartShContent.Contains('--ignore-scripts')) {
+            throw 'Web zip start.sh still installs dependencies; install and start must stay separate.'
+        }
+
+        $webStopShContent = Get-Content -Path (Join-Path $webRoot 'stop.sh') -Raw
+        foreach ($needle in @('lsof -ti', 'fuser', 'kill $PIDS')) {
+            if (-not $webStopShContent.Contains($needle)) {
+                throw "Web zip stop.sh is missing expected stop marker: $needle"
+            }
+        }
+
+        $webStatusShContent = Get-Content -Path (Join-Path $webRoot 'status.sh') -Raw
+        foreach ($needle in @('/api/health', 'CHECK_HOST', 'curl -fsS')) {
+            if (-not $webStatusShContent.Contains($needle)) {
+                throw "Web zip status.sh is missing expected status marker: $needle"
+            }
+        }
+
+        $webInstallBatContent = Get-Content -Path (Join-Path $webRoot 'install.bat') -Raw
+        foreach ($needle in @('npm install --omit=dev --no-audit --no-fund --ignore-scripts', 'dependency installation failed', 'dependency verification failed')) {
+            if (-not $webInstallBatContent.Contains($needle)) {
+                throw "Web zip install.bat is missing expected install marker: $needle"
+            }
+        }
+
+        $webStartBatContent = Get-Content -Path (Join-Path $webRoot 'start.bat') -Raw
+        foreach ($needle in @('Run install.bat first', 'node start-web.mjs')) {
+            if (-not $webStartBatContent.Contains($needle)) {
+                throw "Web zip start.bat is missing expected start-only marker: $needle"
+            }
+        }
+        if ($webStartBatContent.Contains('call npm install') -or $webStartBatContent.Contains('--ignore-scripts')) {
+            throw 'Web zip start.bat still installs dependencies; install and start must stay separate.'
+        }
+
+        $webStopBatContent = Get-Content -Path (Join-Path $webRoot 'stop.bat') -Raw
+        foreach ($needle in @('Get-NetTCPConnection', 'Stop-Process')) {
+            if (-not $webStopBatContent.Contains($needle)) {
+                throw "Web zip stop.bat is missing expected stop marker: $needle"
+            }
+        }
+
+        $webStatusBatContent = Get-Content -Path (Join-Path $webRoot 'status.bat') -Raw
+        foreach ($needle in @('/api/health', 'Invoke-WebRequest', '0.0.0.0')) {
+            if (-not $webStatusBatContent.Contains($needle)) {
+                throw "Web zip status.bat is missing expected status marker: $needle"
             }
         }
 
@@ -269,6 +484,24 @@ try {
         }
         if ([string]$webManifest.sourceLayoutKind -ne 'preextracted-web-package') {
             throw "Web zip manifest has unexpected sourceLayoutKind: $($webManifest.sourceLayoutKind)"
+        }
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $webZip = [System.IO.Compression.ZipFile]::OpenRead($webZipPath)
+        try {
+            foreach ($shellScriptName in @('install.sh', 'start.sh', 'stop.sh', 'status.sh')) {
+                $shellScriptEntry = $webZip.Entries | Where-Object { $_.FullName -like "*/$shellScriptName" } | Select-Object -First 1
+                if ($null -eq $shellScriptEntry) {
+                    throw "Web zip $shellScriptName entry was not found while checking Unix permissions."
+                }
+                $unixMode = ($shellScriptEntry.ExternalAttributes -shr 16) -band 0xFFFF
+                if (($unixMode -band 0x49) -ne 0x49) {
+                    throw ("Web zip {0} is not marked executable for Unix users. Mode: 0{1:o}" -f $shellScriptName, $unixMode)
+                }
+            }
+        }
+        finally {
+            $webZip.Dispose()
         }
     }
 

@@ -359,6 +359,16 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     return true;
   }
 
+  async function callAutomationBackend(channel, payload, fallback) {
+    try {
+      return await appServerBridge.callAppServer(channel, payload);
+    } catch (error) {
+      logger && logger.warn(`[ipc] automation backend unavailable for ${channel}`, error);
+      if (typeof fallback === "function") return fallback();
+      throw automationIpc.backendRequiredError();
+    }
+  }
+
   /** Codex 业务 IPC 总分发。未知 channel 必须抛错，不能再静默返回 null。 */
   const handle = async (channel, payload, context = {}) => {
     switch (channel) {
@@ -475,22 +485,19 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "read-file-binary":
         return localFiles.readFileBinary(payload);
       case "list-automations":
-        // 自动化列表直接读取 Desktop 的本机 TOML，不再返回空列表。
-        return automationIpc.listAutomations();
+        // Web 只是控制面：优先请求 Desktop/App 后端；离线或旧后端时只读展示本机定义。
+        return callAutomationBackend(channel, payload, () => automationIpc.listAutomations());
       case "list-pending-automation-run-threads":
         return { threadIds: [] };
       case "load-recent-conversation-ids-for-host":
         // Web 目前不维护 automation run 历史，只给前端一个稳定空列表避免阻塞页面。
         return [];
       case "automation-run-now":
-        // 立即运行是用户主动操作，可以通过 app-server 发起一次 turn；后台调度仍不在 Web 实现。
-        return automationIpc.runAutomationNow(payload);
       case "automation-create":
       case "automation-update":
       case "automation-delete":
       case "automation-run-archive":
-        // 创建、修改、删除和归档记录涉及 Desktop 的调度/状态管理，Web 明确报只读错误。
-        return automationIpc.throwAutomationReadOnlyError();
+        return callAutomationBackend(channel, payload);
       case "active-workspace-roots":
         return { roots: workspaceIpc.activeWorkspaceRootPaths() };
       case "local-environments":
