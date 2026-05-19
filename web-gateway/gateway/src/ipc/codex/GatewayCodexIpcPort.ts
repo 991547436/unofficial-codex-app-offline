@@ -291,6 +291,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
 
   const viewMessages = createViewMessageHandlers({
     appServerBridge,
+    avatarOverlayOpenStateKey: "electron-avatar-overlay-open",
     broadcast,
     contextClientId,
     debugLogs: DEBUG_LOGS,

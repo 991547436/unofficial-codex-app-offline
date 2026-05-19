@@ -299,6 +299,22 @@ try {
         }
     }
 
+    $webGatewayViewMessagesPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\viewMessages.js'
+    $webGatewayViewMessagesContent = Get-Content -Path $webGatewayViewMessagesPath -Raw
+    foreach ($needle in @('electron-avatar-overlay-open', 'avatar-overlay-open-state-request', 'avatar-overlay-open-state-changed')) {
+        if (-not $webGatewayViewMessagesContent.Contains($needle)) {
+            throw "Web gateway viewMessages is missing expected avatar overlay close marker: $needle"
+        }
+    }
+
+    $webShellBridgePath = Join-Path $portableRoot '_internal\web\web-shell\codex-bridge-polyfill.js'
+    $webShellBridgeContent = Get-Content -Path $webShellBridgePath -Raw
+    foreach ($needle in @('avatar-overlay-open-state-changed', 'w.location.pathname === "/avatar-overlay"', 'w.history.replaceState')) {
+        if (-not $webShellBridgeContent.Contains($needle)) {
+            throw "Web shell bridge is missing expected avatar overlay close marker: $needle"
+        }
+    }
+
     if ($crossPlatformWebEnabled) {
         $webZipPath = Join-Path $artifactRoot $webAssets[0].fileName
         if (-not (Test-Path $webZipPath)) {
@@ -393,6 +409,22 @@ try {
         foreach ($needle in @('callAutomationBackend', 'automation-create', 'automation-run-now')) {
             if (-not $webZipGatewayIpcContent.Contains($needle)) {
                 throw "Web zip gateway IPC is missing expected automation backend-forward marker: $needle"
+            }
+        }
+
+        $webZipViewMessagesPath = Join-Path $webRoot 'gateway\dist\ipc\codex\viewMessages.js'
+        $webZipViewMessagesContent = Get-Content -Path $webZipViewMessagesPath -Raw
+        foreach ($needle in @('electron-avatar-overlay-open', 'avatar-overlay-open-state-request', 'avatar-overlay-open-state-changed')) {
+            if (-not $webZipViewMessagesContent.Contains($needle)) {
+                throw "Web zip gateway viewMessages is missing expected avatar overlay close marker: $needle"
+            }
+        }
+
+        $webZipShellBridgePath = Join-Path $webRoot 'web-shell\codex-bridge-polyfill.js'
+        $webZipShellBridgeContent = Get-Content -Path $webZipShellBridgePath -Raw
+        foreach ($needle in @('avatar-overlay-open-state-changed', 'w.location.pathname === "/avatar-overlay"', 'w.history.replaceState')) {
+            if (-not $webZipShellBridgeContent.Contains($needle)) {
+                throw "Web zip shell bridge is missing expected avatar overlay close marker: $needle"
             }
         }
 

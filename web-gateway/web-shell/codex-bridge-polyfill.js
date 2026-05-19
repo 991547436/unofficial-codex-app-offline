@@ -1582,6 +1582,17 @@
       setSharedObjectSnapshotValue(message.key, message.value);
     }
   });
+  subscribe("avatar-overlay-open-state-changed", (payload) => {
+    if (!payload || typeof payload !== "object" || payload.isOpen === true) return;
+    if (w.location && w.location.pathname === "/avatar-overlay") {
+      try {
+        w.history.replaceState(w.history.state, "", "/");
+        w.dispatchEvent(new PopStateEvent("popstate", { state: w.history.state }));
+      } catch {
+        w.location.replace("/");
+      }
+    }
+  });
 
   w.__codexWebSubscribe = subscribe;
   w.__codexWebUnsubscribe = unsubscribe;

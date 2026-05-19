@@ -18,6 +18,7 @@ function createViewMessageHandlers(deps) {
   const workspaceIpc = deps.workspaceIpc;
   const workspaceRuntime = deps.workspaceRuntime;
   const broadcast = deps.broadcast;
+  const AVATAR_OVERLAY_OPEN_STATE_KEY = deps.avatarOverlayOpenStateKey || "electron-avatar-overlay-open";
   const contextClientId = deps.contextClientId;
   const targetClientIdForContext = deps.targetClientIdForContext;
   const withTargetClient = deps.withTargetClient;
@@ -133,6 +134,29 @@ function createViewMessageHandlers(deps) {
               sourceClientId: contextClientId(context) || null,
             },
           });
+        }
+        return true;
+      }
+      if (payload.type === "avatar-overlay-open-state-request") {
+        const isOpen = desktopState.getGlobalStateValue(AVATAR_OVERLAY_OPEN_STATE_KEY) === true;
+        if (typeof broadcast === "function") {
+          broadcast({ channel: "avatar-overlay-open-state-changed", payload: { isOpen } });
+        }
+        return true;
+      }
+      if (payload.type === "avatar-overlay-open") {
+        const explicitState =
+          Object.prototype.hasOwnProperty.call(payload, "isOpen")
+            ? payload.isOpen
+            : Object.prototype.hasOwnProperty.call(payload, "open")
+              ? payload.open
+              : Object.prototype.hasOwnProperty.call(payload, "value")
+                ? payload.value
+                : false;
+        const isOpen = explicitState === true;
+        desktopState.setGlobalStateValue({ key: AVATAR_OVERLAY_OPEN_STATE_KEY, value: isOpen });
+        if (typeof broadcast === "function") {
+          broadcast({ channel: "avatar-overlay-open-state-changed", payload: { isOpen } });
         }
         return true;
       }
