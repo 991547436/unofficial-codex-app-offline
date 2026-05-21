@@ -928,12 +928,20 @@ const hasPluginsApiKeyDisabledNavBranch = allJavaScriptContent.some(content =>
 if (hasPluginsApiKeyDisabledNavBranch && !pluginsApiKeyNavPatched) {
   throw new Error('Plugins API-key navigation lockout branch is present but was not patched.');
 }
+const pluginsDetailAuthRedirectRe =
+  /\{authMethod:([A-Za-z_$][\w$]*)\}=[A-Za-z_$][\w$]*\(\);if\([A-Za-z_$][\w$]*\(\1\)\)\{let [A-Za-z_$][\w$]*;return/;
 const hasPluginsApiKeyRouteFallback = allJavaScriptContent.some(content =>
   content.includes('pluginDeepLinkAuthBlocked===!0') &&
-  content.includes('o&&!p){let t;return')
+  (
+    content.includes('o&&!p){let t;return') ||
+    pluginsDetailAuthRedirectRe.test(content)
+  )
 );
 if (hasPluginsApiKeyRouteFallback && !pluginsApiKeyRoutePatched) {
   throw new Error('Plugins API-key page fallback branch is present but was not patched.');
+}
+if (allJavaScriptContent.some(content => pluginsDetailAuthRedirectRe.test(content))) {
+  throw new Error('Plugins detail API-key auth redirect is present but was not patched.');
 }
 if (bundledBrowserPluginForceReloadResiduals.length > 0) {
   throw new Error(

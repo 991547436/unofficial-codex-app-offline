@@ -386,6 +386,10 @@ function countOccurrences(content, needle) {
   }
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function patchChromePluginScripts(rootAppDir) {
   const chromePluginRoot = path.join(
     rootAppDir,
@@ -517,9 +521,13 @@ function patchChromeBrowserClient(filePath) {
   } else {
     const helperNeedleMatch = content.match(
       /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=import\.meta\.__codexNativePipe;return \2==null\|\|typeof \2\.createConnection!="function"\?null:\2\}/,
+    ) ?? content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=globalThis\.nodeRepl\?\.nativePipe;return \2==null\|\|typeof \2\.createConnection!="function"\?null:\2\}/,
     );
     const unavailableMessageMatch = content.match(
       /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=import\.meta\.__codexNativePipeUnavailableMessage;return typeof \2=="string"&&\2\.length>0\?\2:"privileged native pipe bridge is not available; browser-client is not trusted"\}/,
+    ) ?? content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\);return \2\?`privileged native pipe bridge is not available; browser-client is not trusted\. Load browser-client from the \$\{\2\} marketplace directory\.`:"privileged native pipe bridge is not available; browser-client is not trusted"\}/,
     );
     const platformImportMatch = content.match(
       /import [A-Za-z_$][\w$]*,\{platform as ([A-Za-z_$][\w$]*)\}from"node:os";/,
@@ -527,7 +535,7 @@ function patchChromeBrowserClient(filePath) {
       /import\{platform as ([A-Za-z_$][\w$]*)\}from"node:os";/,
     );
     const pipePrefixMatch = content.match(
-      /var ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)=>\2==="win32"\?"\\\\\\\\\.\\\\pipe\\\\codex-browser-use":"\/tmp\/codex-browser-use"/,
+      /var ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)=>\2==="win32"\?"[^"]*codex-browser-use":"\/tmp\/codex-browser-use"/,
     );
     if (!helperNeedleMatch || !unavailableMessageMatch || !platformImportMatch || !pipePrefixMatch) {
       throw new Error(
@@ -546,16 +554,40 @@ function patchChromeBrowserClient(filePath) {
       `function _codexOfflineShouldUseNativePipeFallback(t){return ${nativePipeSymbols.platform}()==="win32"&&typeof t=="string"&&t.startsWith(${nativePipeSymbols.pipePrefix}("win32"))}` +
       nativePipeHelpersWithoutTimeout +
       nativePipeFallbackPatchMarker;
-    const createNeedle =
-      `static async create(e){let r=${nativePipeSymbols.bridgeGetter}();if(r!=null){let n=await r.createConnection(e);return new t(n)}throw new Error(${nativePipeSymbols.unavailableMessage}())}`;
-    const createReplacement =
-      `static async create(e){if(_codexOfflineShouldUseNativePipeFallback(e)){let r=await _codexOfflineCreateNativePipeConnection(e);return new t(r)}let r=${nativePipeSymbols.bridgeGetter}();if(r!=null){let n=await _codexOfflineBridgeCreateConnection(r,e);return new t(n)}throw new Error(${nativePipeSymbols.unavailableMessage}())}${nativePipeDirectPatchMarker}`;
+    const createNeedleMatch = content.match(
+      new RegExp(
+        `static async create\\(([A-Za-z_$][\\w$]*)\\)\\{` +
+        `let ([A-Za-z_$][\\w$]*)=${escapeRegExp(nativePipeSymbols.bridgeGetter)}\\(\\);` +
+        `if\\(\\2!=null\\)\\{let ([A-Za-z_$][\\w$]*)=await \\2\\.createConnection\\(\\1\\);` +
+        `return new ([A-Za-z_$][\\w$]*)\\(\\3\\)\\}` +
+        `throw new Error\\(${escapeRegExp(nativePipeSymbols.unavailableMessage)}\\(\\)\\)\\}`,
+      ),
+    );
 
-    if (!content.includes(helperNeedle) || !content.includes(createNeedle)) {
+    if (!content.includes(helperNeedle) || !createNeedleMatch) {
       throw new Error(
         'Could not locate Chrome browser-client native pipe transport to add Windows fallback.',
       );
     }
+
+    const [
+      createNeedle,
+      pipeArg,
+      bridgeVar,
+      connectionVar,
+      constructorVar,
+    ] = createNeedleMatch;
+    const createReplacement =
+      `static async create(${pipeArg}){` +
+      `if(_codexOfflineShouldUseNativePipeFallback(${pipeArg})){` +
+      `let ${bridgeVar}=await _codexOfflineCreateNativePipeConnection(${pipeArg});` +
+      `return new ${constructorVar}(${bridgeVar})}` +
+      `let ${bridgeVar}=${nativePipeSymbols.bridgeGetter}();` +
+      `if(${bridgeVar}!=null){` +
+      `let ${connectionVar}=await _codexOfflineBridgeCreateConnection(${bridgeVar},${pipeArg});` +
+      `return new ${constructorVar}(${connectionVar})}` +
+      `throw new Error(${nativePipeSymbols.unavailableMessage}())}` +
+      nativePipeDirectPatchMarker;
 
     content = content
       .replace(helperNeedle, helperReplacement)
@@ -717,18 +749,57 @@ function patchChromeBrowserClient(filePath) {
   if (content.includes(ambientNetworkPatchMarker)) {
     log('Chrome browser client ambient network default already patched.');
   } else {
-    const ambientNetworkMatch = content.match(
+    const requestMetaAmbientNetworkMatch = content.match(
       /function ([A-Za-z_$][\w$]*)\(\)\{return globalThis\.nodeRepl\?\.requestMeta\?\.\[([A-Za-z_$][\w$]*)\]===!0\}/,
     );
-    if (!ambientNetworkMatch) {
+    let ambientNetworkNeedle = null;
+    let ambientNetworkReplacement = null;
+
+    if (requestMetaAmbientNetworkMatch) {
+      const [
+        needle,
+        ambientNetworkFunction,
+        ambientNetworkHeader,
+      ] = requestMetaAmbientNetworkMatch;
+
+      ambientNetworkNeedle = needle;
+      ambientNetworkReplacement =
+        `function ${ambientNetworkFunction}(){let t=globalThis.nodeRepl?.requestMeta?.[${ambientNetworkHeader}];return t===!1?!1:!0}${ambientNetworkPatchMarker}`;
+    } else {
+      const ambientEnvVarMatch = content.match(
+        /([A-Za-z_$][\w$]*)="BROWSER_USE_DISABLE_AMBIENT_NETWORK"/,
+      );
+      const ambientEnvVar = ambientEnvVarMatch?.[1];
+      const envGuardMatch = ambientEnvVar
+        ? content.match(
+          new RegExp(
+            `function ([A-Za-z_$][\\w$]*)\\(\\)\\{return ([A-Za-z_$][\\w$]*)\\(${escapeRegExp(ambientEnvVar)}\\)\\}`,
+          ),
+        )
+        : null;
+      const booleanReader = envGuardMatch?.[2];
+      const rawReaderMatch = booleanReader
+        ? content.match(
+          new RegExp(
+            `function ${escapeRegExp(booleanReader)}\\(([A-Za-z_$][\\w$]*)\\)\\{return ([A-Za-z_$][\\w$]*)\\(\\1\\)==="1"\\}`,
+          ),
+        )
+        : null;
+      const rawReader = rawReaderMatch?.[2];
+
+      if (envGuardMatch && rawReader && ambientEnvVar) {
+        ambientNetworkNeedle = envGuardMatch[0];
+        ambientNetworkReplacement =
+          `function ${envGuardMatch[1]}(){let t=${rawReader}(${ambientEnvVar});return t==="0"||t==="false"?!1:!0}${ambientNetworkPatchMarker}`;
+      }
+    }
+
+    if (!ambientNetworkNeedle || !ambientNetworkReplacement) {
       throw new Error(
         'Could not locate Chrome browser-client ambient network guard to default offline.',
       );
     }
 
-    const [ambientNetworkNeedle, ambientNetworkFunction, ambientNetworkHeader] = ambientNetworkMatch;
-    const ambientNetworkReplacement =
-      `function ${ambientNetworkFunction}(){let t=globalThis.nodeRepl?.requestMeta?.[${ambientNetworkHeader}];return t===!1?!1:!0}${ambientNetworkPatchMarker}`;
     content = content.replace(ambientNetworkNeedle, ambientNetworkReplacement);
     changed = true;
     log('Chrome browser client ambient network default patched.');
@@ -1459,7 +1530,7 @@ try {
   const HEARTBEAT_GATE_ID_MARKER = '`1488233300`';
   const HEARTBEAT_GATE_NEEDLE = '$f(`1488233300`)';
   const HEARTBEAT_GATE_INLINE_RE =
-    /([,;]\s*\w+\s*=)\s*[$\w]+\(`1488233300`\)/g;
+    /([,;]\s*[$\w]+\s*=)\s*[$\w]+\(`1488233300`\)/g;
   const HEARTBEAT_GATE_REPLACEMENT = '!0';
   // ≥ 26.429.x: extracted to a standalone hook.
   const HEARTBEAT_GATE_FUNCTION_RE =
@@ -1619,6 +1690,8 @@ try {
     /([,;])([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{hostId:([A-Za-z_$][\w$]*)\}\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)&&\2&&!([A-Za-z_$][\w$]*)/g;
   const PLUGINS_ROUTE_FEATURE_AUTH_RE =
     /([,;])([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{hostId:([A-Za-z_$][\w$]*)\}\)&&!([A-Za-z_$][\w$]*)/g;
+  const PLUGINS_DETAIL_AUTH_REDIRECT_RE =
+    /(\{authMethod:([A-Za-z_$][\w$]*)\}=[A-Za-z_$][\w$]*\(\);)if\([A-Za-z_$][\w$]*\(\2\)\)\{let ([A-Za-z_$][\w$]*);return/g;
 
   // ── Patch 22: Enable Background Subagents for offline builds ───────────
   //
@@ -1742,8 +1815,10 @@ try {
   const REMOTE_CONNECTIONS_FEATURE_GATE_ID_MARKER = '`4114442250`';
   const REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE =
     /([,;]\s*\w+\s*=)\s*[$\w]+\(`4114442250`\)/g;
+  const REMOTE_CONNECTIONS_FEATURE_GATE_CONFIG_RE =
+    /([,;]\s*[$\w]+\s*=)\s*[$\w]+\([$\w]+\([$\w]+,`4114442250`\)\)/g;
   const REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE =
-    /[$\w]+\(`4114442250`\)/;
+    /[$\w]+\(`4114442250`\)|[$\w]+\([$\w]+,`4114442250`\)/;
 
   // ── Patch 33b: Route Codex Mobile auth refresh through desktop login ────
   //
@@ -1758,12 +1833,9 @@ try {
   const CODEX_MOBILE_SETUP_CHUNK_RE = /^codex-mobile-setup-flow-.*\.js$/;
   const ONBOARDING_LOGIN_CHUNK_RE = /^onboarding-login-content-.*\.js$/;
   const CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE =
-    /import\{t as he\}from"\.\/chatgpt-token-auth\.browser-[^"]+\.js";/;
-  const CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER =
-    'async function De(e){try{return await e()}catch(e){throw e instanceof C?e.status===404?new ve:e.status===403?new ye(e.message):e.status===401?(he(),new X(`ChatGPT auth is required to load remote control environments.`)):Error(`Remote control request failed (${e.status}): ${e.message}`):e}}';
-  const CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_REPLACEMENT =
-    'async function De(e){try{return await e()}catch(t){throw t instanceof C?t.status===404?new ve:t.status===403?new ye(t.message):t.status===401?await codexOfflineRemoteControlRelogin(e):Error(`Remote control request failed (${t.status}): ${t.message}`):t}}async function codexOfflineRemoteControlRelogin(e){if(he())throw new X(`ChatGPT auth is required to load remote control environments.`);try{let t=await codexOfflineChatGptLogin({useStreamlinedLogin:!0});t.authUrl&&O.dispatchMessage(`open-in-browser`,{url:t.authUrl});let n=await t.completion;if(n.success)return await e()}catch{}throw new X(`ChatGPT auth is required to load remote control environments.`)}' +
-    CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER;
+    /import\{t as ([A-Za-z_$][\w$]*)\}from"\.\/chatgpt-token-auth\.browser-[^"]+\.js";/;
+  const CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_RE =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{try\{return await \2\(\)\}catch\(([A-Za-z_$][\w$]*)\)\{throw \3 instanceof ([A-Za-z_$][\w$]*)\?\3\.status===404\?new ([A-Za-z_$][\w$]*):\3\.status===403\?new ([A-Za-z_$][\w$]*)\(\3\.message\):\3\.status===401\?\(([A-Za-z_$][\w$]*)\(\),new ([A-Za-z_$][\w$]*)\(`ChatGPT auth is required to load remote control environments\.`\)\):Error\(`Remote control request failed \(\$\{\3\.status\}\): \$\{\3\.message\}`\):\3\}\}/;
 
   // ── Patch 34: Enable Artifact Electron native functionality ────────────
   //
@@ -1993,7 +2065,9 @@ try {
         originalContent.includes('sidebarElectron.pluginsDisabledTooltip');
       pluginsApiKeyNavAlreadyCorrect ||=
         originalContent.includes(PLUGINS_API_KEY_NAV_PATCH_MARKER);
-      pluginsApiKeyRouteGateSeen ||= originalContent.includes('pluginDeepLinkAuthBlocked===!0');
+      pluginsApiKeyRouteGateSeen ||=
+        originalContent.includes('pluginDeepLinkAuthBlocked===!0') ||
+        PLUGINS_DETAIL_AUTH_REDIRECT_RE.test(originalContent);
       pluginsApiKeyRouteAlreadyCorrect ||= originalContent.includes(PLUGINS_API_KEY_ROUTE_PATCH_MARKER);
       backgroundSubagentsGateSeen ||= originalContent.includes(BACKGROUND_SUBAGENTS_GATE_ID_MARKER);
       threadOverlayGateSeen ||= originalContent.includes(THREAD_OVERLAY_GATE_ID_MARKER);
@@ -2013,6 +2087,7 @@ try {
         originalContent.includes(REMOTE_CONNECTIONS_GATE_ID_MARKER);
       remoteConnectionsFeatureGateSeen ||=
         REMOTE_CONNECTIONS_FEATURE_GATE_UNPATCHED_RE.test(originalContent);
+      REMOTE_CONNECTIONS_FEATURE_GATE_CONFIG_RE.lastIndex = 0;
       codexMobileAuthReloginSeen ||=
         originalContent.includes('/wham/remote/control/mfa_requirement') &&
         originalContent.includes('ChatGPT auth is required to load remote control environments.');
@@ -2449,6 +2524,16 @@ try {
       }
 
       {
+        const detailAuthRedirectMatch = content.match(PLUGINS_DETAIL_AUTH_REDIRECT_RE);
+        if (detailAuthRedirectMatch) {
+          content = content.replace(
+            PLUGINS_DETAIL_AUTH_REDIRECT_RE,
+            `$1if(!1${PLUGINS_API_KEY_ROUTE_PATCH_MARKER}){let $3;return`,
+          );
+          pluginsApiKeyRouteGateCount += 1;
+          modified = true;
+        }
+
         if (originalContent.includes('pluginDeepLinkAuthBlocked===!0')) {
           const skillsRouteNeedle = 'o&&!p){let t;return';
           const skillsRouteReplacement =
@@ -2457,6 +2542,18 @@ try {
             content = content.replace(skillsRouteNeedle, skillsRouteReplacement);
             pluginsApiKeyRouteGateCount += 1;
             modified = true;
+          } else {
+            const skillsRouteAuthBlockMatch = content.match(
+              /,([A-Za-z_$][\w$]*)&&![A-Za-z_$][\w$]*\)\{let ([A-Za-z_$][\w$]*);return/,
+            );
+            if (skillsRouteAuthBlockMatch) {
+              content = content.replace(
+                skillsRouteAuthBlockMatch[0],
+                `,${skillsRouteAuthBlockMatch[1]}${PLUGINS_API_KEY_ROUTE_PATCH_MARKER}){let ${skillsRouteAuthBlockMatch[2]};return`,
+              );
+              pluginsApiKeyRouteGateCount += 1;
+              modified = true;
+            }
           }
         }
       }
@@ -2598,6 +2695,13 @@ try {
           content = content.replaceAll(REMOTE_CONNECTIONS_FEATURE_GATE_INLINE_RE, '$1!0');
           remoteConnectionsFeatureGateCount += inlineMatches.length;
           modified = true;
+        } else {
+          const configMatches = content.match(REMOTE_CONNECTIONS_FEATURE_GATE_CONFIG_RE);
+          if (configMatches) {
+            content = content.replaceAll(REMOTE_CONNECTIONS_FEATURE_GATE_CONFIG_RE, '$1!0');
+            remoteConnectionsFeatureGateCount += configMatches.length;
+            modified = true;
+          }
         }
       }
 
@@ -2613,26 +2717,74 @@ try {
             'login chunk was not found.',
           );
         }
-        if (!CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE.test(content)) {
+        const chatGptTokenAuthImportMatch = content.match(
+          CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE,
+        );
+        const remoteControlAuthHandlerMatch = content.match(
+          CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_RE,
+        );
+        const dispatchBridgeMatch = content.match(
+          /([A-Za-z_$][\w$]*)\.dispatchMessage\(`open-in-browser`,\{url:/,
+        );
+
+        if (!chatGptTokenAuthImportMatch) {
           throw new Error(
             'Codex Mobile remote-control auth path is present, but the ChatGPT ' +
             'token-auth import pattern no longer matches.',
           );
         }
-        if (!content.includes(CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER)) {
+        if (!remoteControlAuthHandlerMatch) {
           throw new Error(
             'Codex Mobile remote-control auth path is present, but the 401 handler ' +
             'pattern no longer matches.',
           );
         }
+        if (!dispatchBridgeMatch) {
+          throw new Error(
+            'Codex Mobile remote-control auth path is present, but the browser-open ' +
+            'dispatch bridge pattern no longer matches.',
+          );
+        }
+
+        const [
+          remoteControlAuthHandlerNeedle,
+          handlerFunction,
+          requestFunction,
+          ,
+          httpErrorClass,
+          notFoundErrorClass,
+          forbiddenErrorClass,
+          tokenAuthFunction,
+          authRequiredErrorClass,
+        ] = remoteControlAuthHandlerMatch;
+        const dispatchBridge = dispatchBridgeMatch[1];
+        const errorVar = '_codexOfflineRemoteControlError';
+        const loginVar = '_codexOfflineChatGptLoginResult';
+        const completionVar = '_codexOfflineChatGptLoginCompletion';
+        const remoteControlAuthHandlerReplacement =
+          `async function ${handlerFunction}(${requestFunction}){` +
+          `try{return await ${requestFunction}()}` +
+          `catch(${errorVar}){throw ${errorVar} instanceof ${httpErrorClass}?` +
+          `${errorVar}.status===404?new ${notFoundErrorClass}:` +
+          `${errorVar}.status===403?new ${forbiddenErrorClass}(${errorVar}.message):` +
+          `${errorVar}.status===401?await codexOfflineRemoteControlRelogin(${requestFunction}):` +
+          `Error(\`Remote control request failed (${'${'}${errorVar}.status}): ${'${'}${errorVar}.message}\`):${errorVar}}}` +
+          `async function codexOfflineRemoteControlRelogin(${requestFunction}){` +
+          `if(${tokenAuthFunction}())throw new ${authRequiredErrorClass}(\`ChatGPT auth is required to load remote control environments.\`);` +
+          `try{let ${loginVar}=await codexOfflineChatGptLogin({useStreamlinedLogin:!0});` +
+          `${loginVar}.authUrl&&${dispatchBridge}.dispatchMessage(\`open-in-browser\`,{url:${loginVar}.authUrl});` +
+          `let ${completionVar}=await ${loginVar}.completion;` +
+          `if(${completionVar}.success)return await ${requestFunction}()}` +
+          `catch{}throw new ${authRequiredErrorClass}(\`ChatGPT auth is required to load remote control environments.\`)}` +
+          CODEX_MOBILE_AUTH_RELOGIN_PATCH_MARKER;
 
         content = content.replace(
           CODEX_MOBILE_CHATGPT_TOKEN_AUTH_IMPORT_RE,
           `$&import{r as codexOfflineChatGptLogin}from"./${onboardingLoginChunk}";`,
         );
         content = content.replace(
-          CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER,
-          CODEX_MOBILE_REMOTE_CONTROL_AUTH_HANDLER_REPLACEMENT,
+          remoteControlAuthHandlerNeedle,
+          remoteControlAuthHandlerReplacement,
         );
         codexMobileAuthReloginPatched = true;
         modified = true;
