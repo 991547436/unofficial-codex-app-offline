@@ -4,6 +4,10 @@ export {};
 const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
+const {
+  DEFAULT_DESKTOP_FEATURE_STATE,
+  normalizeDesktopFeatureValues,
+} = require("./capabilityContract");
 
 function createDesktopState(deps) {
   const desktopGlobalStatePath = deps.desktopGlobalStatePath;
@@ -25,6 +29,7 @@ function createDesktopState(deps) {
   const workspaceIpc = deps.workspaceIpc;
   const workspaceRuntime = deps.workspaceRuntime;
   let DESKTOP_GLOBAL_STATE = {};
+  let DESKTOP_FEATURE_STATE = { ...DEFAULT_DESKTOP_FEATURE_STATE };
 
   /** 写入 persisted atom 前做兼容修正，例如强制显示审批模式。 */
   function normalizePersistedAtomValue(key, value) {
@@ -109,6 +114,12 @@ function createDesktopState(deps) {
   function getDesktopGlobalStateValue(key) {
     loadDesktopGlobalState();
     return Object.prototype.hasOwnProperty.call(DESKTOP_GLOBAL_STATE, key) ? DESKTOP_GLOBAL_STATE[key] : undefined;
+  }
+
+  /** 保存 renderer 探测到的桌面能力，并保持 Web 端必须可用的能力不被探测失败关掉。 */
+  function setDesktopFeatureValues(payload) {
+    DESKTOP_FEATURE_STATE = normalizeDesktopFeatureValues(payload, DESKTOP_FEATURE_STATE);
+    return { ...DESKTOP_FEATURE_STATE };
   }
 
   /** 设置 Desktop globalState 中的单个 key 并落盘。 */
@@ -512,18 +523,9 @@ function createDesktopState(deps) {
     const normalized = String(key);
     const desktopValue = getDesktopConfigurationValue(normalized);
     if (desktopValue !== undefined) return desktopValue;
-    const known = new Map([
-      ["browserAgent", false],
-      ["browserAgentAvailable", false],
-      ["browserPane", false],
-      ["computerUse", false],
-      ["multiWindow", false],
-      ["ambientSuggestions", false],
-      ["artifactsPane", false],
-      ["avatarOverlay", false],
-      ["control", false],
-    ]);
-    if (known.has(normalized)) return known.get(normalized);
+    if (Object.prototype.hasOwnProperty.call(DESKTOP_FEATURE_STATE, normalized)) {
+      return DESKTOP_FEATURE_STATE[normalized];
+    }
     if (normalized.includes("enabled")) return false;
     if (normalized.includes("mode")) return "off";
     if (normalized.includes("path")) return null;
@@ -559,6 +561,7 @@ function createDesktopState(deps) {
     readPinnedThreadIds,
     setConfigurationValue,
     setDesktopGlobalStateValue,
+    setDesktopFeatureValues,
     setDesktopPersistedAtom,
     setGlobalStateValue,
     setPinnedThreadsOrderValue,

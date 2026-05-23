@@ -956,7 +956,8 @@ async function createGateway() {
 	  homeDir: ${JSON.stringify(gatewayConfig.homeDir)},
 	  appServer: ${JSON.stringify(appServer.getMode())},
 	  modelList: ${JSON.stringify(cachedModelListForWebConfig(appServer))},
-	  sharedObjectSnapshot: ${JSON.stringify(gatewayConfig.sharedObjectSnapshot || {})}
+	  sharedObjectSnapshot: ${JSON.stringify(gatewayConfig.sharedObjectSnapshot || {})},
+	  capabilities: ${JSON.stringify(gatewayConfig.capabilities || {})}
 	};
 })();`
       );

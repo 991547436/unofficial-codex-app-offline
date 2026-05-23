@@ -21,6 +21,72 @@ function Resolve-AbsolutePath {
     return [System.IO.Path]::GetFullPath((Join-Path $BasePath $PathValue))
 }
 
+function Assert-ContentContainsMarkers {
+    param(
+        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)]$Markers,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    foreach ($needle in @($Markers)) {
+        if (-not $Content.Contains([string]$needle)) {
+            throw "$Context is missing expected marker: $needle"
+        }
+    }
+}
+
+function Read-CapabilityContract {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContractPath
+    )
+
+    if (-not (Test-Path $ContractPath)) {
+        throw "Web gateway capability contract was not found: $ContractPath"
+    }
+
+    $nodeScript = @'
+const contract = require(process.argv[1]);
+console.log(JSON.stringify({
+  statsigDefaultFeaturesConfig: contract.STATSIG_DEFAULT_FEATURES_CONFIG,
+  statsigDefaultFeatureOverrides: contract.STATSIG_DEFAULT_FEATURE_OVERRIDES,
+  defaultDesktopFeatureState: contract.DEFAULT_DESKTOP_FEATURE_STATE,
+  requiredWebShellFeatureMarkers: contract.REQUIRED_WEB_SHELL_FEATURE_MARKERS,
+  requiredStatsigFeatureMarkers: contract.REQUIRED_STATSIG_FEATURE_MARKERS,
+  requiredDesktopFeatureMarkers: contract.REQUIRED_DESKTOP_FEATURE_MARKERS,
+}));
+'@
+    $json = & node -e $nodeScript $ContractPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to load Web gateway capability contract: $ContractPath"
+    }
+    return $json | ConvertFrom-Json
+}
+
+function Assert-CapabilityContractDefaults {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    if ($Contract.statsigDefaultFeaturesConfig -ne 'statsig_default_enable_features') {
+        throw "$Context capability contract has an unexpected Statsig config key: $($Contract.statsigDefaultFeaturesConfig)"
+    }
+
+    foreach ($needle in @($Contract.requiredStatsigFeatureMarkers)) {
+        $featureProperty = $Contract.statsigDefaultFeatureOverrides.PSObject.Properties[[string]$needle]
+        if ($null -eq $featureProperty -or $featureProperty.Value -ne $true) {
+            throw "$Context capability contract does not force expected Statsig feature: $needle"
+        }
+    }
+
+    foreach ($needle in @($Contract.requiredDesktopFeatureMarkers | Where-Object { $_ -ne 'setDesktopFeatureValues' })) {
+        $featureProperty = $Contract.defaultDesktopFeatureState.PSObject.Properties[[string]$needle]
+        if ($null -eq $featureProperty -or $featureProperty.Value -ne $true) {
+            throw "$Context capability contract does not force expected Desktop feature: $needle"
+        }
+    }
+}
+
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $buildMetadataFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $BuildMetadataPath
@@ -309,11 +375,24 @@ try {
 
     $webShellBridgePath = Join-Path $portableRoot '_internal\web\web-shell\codex-bridge-polyfill.js'
     $webShellBridgeContent = Get-Content -Path $webShellBridgePath -Raw
-    foreach ($needle in @('avatar-overlay-open-state-changed', 'w.location.pathname === "/avatar-overlay"', 'w.history.replaceState')) {
-        if (-not $webShellBridgeContent.Contains($needle)) {
-            throw "Web shell bridge is missing expected avatar overlay close marker: $needle"
-        }
-    }
+    $webGatewayCapabilityContractPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\capabilityContract.js'
+    $webGatewayCapabilityContractDataPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\capabilityContractData.cjs'
+    $webGatewayCapabilityContractContent = Get-Content -Path $webGatewayCapabilityContractPath -Raw
+    $webGatewayCapabilityContractDataContent = Get-Content -Path $webGatewayCapabilityContractDataPath -Raw
+    $webGatewayCapabilityContract = Read-CapabilityContract -ContractPath $webGatewayCapabilityContractPath
+    Assert-CapabilityContractDefaults -Contract $webGatewayCapabilityContract -Context 'Web gateway'
+    Assert-ContentContainsMarkers -Content $webShellBridgeContent -Markers $webGatewayCapabilityContract.requiredWebShellFeatureMarkers -Context 'Web shell bridge'
+    Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractContent -Markers @('capabilityContractData.cjs') -Context 'Web gateway capability contract'
+    Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractDataContent -Markers $webGatewayCapabilityContract.requiredStatsigFeatureMarkers -Context 'Web gateway capability contract data'
+    Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractDataContent -Markers $webGatewayCapabilityContract.requiredDesktopFeatureMarkers -Context 'Web gateway capability contract data'
+
+    $webGatewayFeaturePatchesPath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\featurePatches.js'
+    $webGatewayFeaturePatchesContent = Get-Content -Path $webGatewayFeaturePatchesPath -Raw
+    Assert-ContentContainsMarkers -Content $webGatewayFeaturePatchesContent -Markers @('STATSIG_DEFAULT_FEATURE_OVERRIDES', './capabilityContract') -Context 'Web gateway feature patch defaults'
+
+    $webGatewayDesktopStatePath = Join-Path $portableRoot '_internal\web\gateway\dist\ipc\codex\desktopState.js'
+    $webGatewayDesktopStateContent = Get-Content -Path $webGatewayDesktopStatePath -Raw
+    Assert-ContentContainsMarkers -Content $webGatewayDesktopStateContent -Markers @('setDesktopFeatureValues', 'normalizeDesktopFeatureValues', './capabilityContract') -Context 'Web gateway desktop state'
 
     if ($crossPlatformWebEnabled) {
         $webZipPath = Join-Path $artifactRoot $webAssets[0].fileName
@@ -422,11 +501,24 @@ try {
 
         $webZipShellBridgePath = Join-Path $webRoot 'web-shell\codex-bridge-polyfill.js'
         $webZipShellBridgeContent = Get-Content -Path $webZipShellBridgePath -Raw
-        foreach ($needle in @('avatar-overlay-open-state-changed', 'w.location.pathname === "/avatar-overlay"', 'w.history.replaceState')) {
-            if (-not $webZipShellBridgeContent.Contains($needle)) {
-                throw "Web zip shell bridge is missing expected avatar overlay close marker: $needle"
-            }
-        }
+        $webZipCapabilityContractPath = Join-Path $webRoot 'gateway\dist\ipc\codex\capabilityContract.js'
+        $webZipCapabilityContractDataPath = Join-Path $webRoot 'gateway\dist\ipc\codex\capabilityContractData.cjs'
+        $webZipCapabilityContractContent = Get-Content -Path $webZipCapabilityContractPath -Raw
+        $webZipCapabilityContractDataContent = Get-Content -Path $webZipCapabilityContractDataPath -Raw
+        $webZipCapabilityContract = Read-CapabilityContract -ContractPath $webZipCapabilityContractPath
+        Assert-CapabilityContractDefaults -Contract $webZipCapabilityContract -Context 'Web zip gateway'
+        Assert-ContentContainsMarkers -Content $webZipShellBridgeContent -Markers $webZipCapabilityContract.requiredWebShellFeatureMarkers -Context 'Web zip shell bridge'
+        Assert-ContentContainsMarkers -Content $webZipCapabilityContractContent -Markers @('capabilityContractData.cjs') -Context 'Web zip capability contract'
+        Assert-ContentContainsMarkers -Content $webZipCapabilityContractDataContent -Markers $webZipCapabilityContract.requiredStatsigFeatureMarkers -Context 'Web zip capability contract data'
+        Assert-ContentContainsMarkers -Content $webZipCapabilityContractDataContent -Markers $webZipCapabilityContract.requiredDesktopFeatureMarkers -Context 'Web zip capability contract data'
+
+        $webZipFeaturePatchesPath = Join-Path $webRoot 'gateway\dist\ipc\codex\featurePatches.js'
+        $webZipFeaturePatchesContent = Get-Content -Path $webZipFeaturePatchesPath -Raw
+        Assert-ContentContainsMarkers -Content $webZipFeaturePatchesContent -Markers @('STATSIG_DEFAULT_FEATURE_OVERRIDES', './capabilityContract') -Context 'Web zip feature patch defaults'
+
+        $webZipDesktopStatePath = Join-Path $webRoot 'gateway\dist\ipc\codex\desktopState.js'
+        $webZipDesktopStateContent = Get-Content -Path $webZipDesktopStatePath -Raw
+        Assert-ContentContainsMarkers -Content $webZipDesktopStateContent -Markers @('setDesktopFeatureValues', 'normalizeDesktopFeatureValues', './capabilityContract') -Context 'Web zip desktop state'
 
         foreach ($shellScriptName in @('install.sh', 'start.sh', 'stop.sh', 'status.sh')) {
             $shellScriptPath = Join-Path $webRoot $shellScriptName
@@ -748,7 +840,23 @@ const asar = require('@electron/asar');
 const path = require('path');
 
 const asarPath = process.argv[1];
-const PATCH_MARKER = '/* codex-offline:windowsStore-patch */';
+const capabilityContractPath = process.argv[2];
+const capabilityContract = require(capabilityContractPath);
+const DESKTOP_ASAR_PATCH_MARKERS = capabilityContract.DESKTOP_ASAR_PATCH_MARKERS || [];
+const DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS = capabilityContract.DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS || [];
+const DESKTOP_BROWSER_USE_CAPABILITY_KEYS = capabilityContract.DESKTOP_BROWSER_USE_CAPABILITY_KEYS || [];
+const FAST_MODE_CONTRACT = capabilityContract.FAST_MODE_CONTRACT || {};
+const CONTEXT_USAGE_CONTRACT = capabilityContract.CONTEXT_USAGE_CONTRACT || {};
+function requiredPatchMarker(marker) {
+  if (!DESKTOP_ASAR_PATCH_MARKERS.includes(marker)) {
+    throw new Error(`Capability contract is missing required app.asar patch marker: ${marker}`);
+  }
+  return marker;
+}
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+const PATCH_MARKER = requiredPatchMarker('/* codex-offline:windowsStore-patch */');
 const SETTINGS_ROUTE_BAD_PATTERN_RE =
   /searchParams\.set\("initialRoute","\/settings\/"\+\([A-Za-z_$][\w$]*\.section\|\|"agent"\)\);/;
 const LOCALE_SOURCE_BAD_PATTERN = '.get(`locale_source`,`IDE`)';
@@ -759,27 +867,45 @@ const SLASH_UI_MARKERS = [
   'composer.planSlashCommand.title',
 ];
 const CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
-const CODEX_MOBILE_AUTH_RELOGIN_MARKER = '/*codex-offline:codex-mobile-auth-relogin*/';
-const KNOWN_RAW_GATE_IDS = [
-  '4166894088',
-  '3075919032',
-  '3789238711',
-  '2302560359',
-  '2679188970',
-  '1488233300',
-  '2425897452',
-  '3903742690',
-  '2553306736',
-  '505458',
-  '1907601843',
-  '410262010',
-  '410065390',
-  '4250630194',
-  '588076040',
-  '533078438',
-  '1609556872',
-];
+const CODEX_MOBILE_AUTH_RELOGIN_MARKER = requiredPatchMarker('/*codex-offline:codex-mobile-auth-relogin*/');
+const FAST_MODE_SELECTOR_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.selectorPatchMarker);
+const FAST_MODE_AUTH_METHOD_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.authMethodPatchMarker);
+const FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER =
+  requiredPatchMarker(FAST_MODE_CONTRACT.serviceTierOptionsPatchMarker);
+const CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER =
+  requiredPatchMarker(CONTEXT_USAGE_CONTRACT.visibilityPatchMarker);
+const CONTEXT_USAGE_STATUS_SECTION_KEY =
+  CONTEXT_USAGE_CONTRACT.localStatusSectionStorageKey || 'local-conversation-status-section-visible';
+const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
+const BUNDLED_RUNTIME_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-runtime-plugins*/');
+const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER = requiredPatchMarker('/*codex-offline:windows-browser-use-capability*/');
+const PLUGINS_API_KEY_NAV_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-nav*/');
+const PLUGINS_API_KEY_ROUTE_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-route*/');
+const KNOWN_RAW_GATE_IDS = capabilityContract.DESKTOP_ASAR_KNOWN_GATE_IDS || [];
 const MEMORIES_GATE_RESIDUAL_PATTERN = '[$s]:Ue(e,ec)&&We(e,Qs).groupName===`Test`';
+const bundledBrowserPluginForceReloadRe = new RegExp(
+  'forceReload:!0[\\s\\S]{0,500}(?:' +
+    [...DESKTOP_BROWSER_USE_CAPABILITY_KEYS.filter(key => key.endsWith('BrowserUseAllowed')), 'syncInstallStateWithChromeExtension']
+      .map(escapeRegExp)
+      .join('|') +
+    ')'
+);
+const fastModeServiceTierOptionsResidualRe =
+  /function\s+[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\{return\[\{description:[A-Za-z_$][\w$]*\.standardDescription,iconKind:null,label:[A-Za-z_$][\w$]*\.standardLabel,tier:null,value:null\},\.\.\.\([A-Za-z_$][\w$]*\?\.serviceTiers\?\?\[\]\)\.map\([A-Za-z_$][\w$]*=>\(\{description:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\),iconKind:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.id,[A-Za-z_$][\w$]*\.name\),label:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\),tier:[A-Za-z_$][\w$]*,value:[A-Za-z_$][\w$]*\.id\}\)\)\]\}/;
+const contextUsageStatusSectionPatchedRe = new RegExp(
+  String.raw`[$\w]+\(` +
+    '`' +
+    escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
+    '`' +
+    String.raw`,!0${escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER)}\)`
+);
+const contextUsageStatusSectionResidualRe = new RegExp(
+  String.raw`[$\w]+\(` +
+    '`' +
+    escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
+    '`' +
+    String.raw`,!1\)`
+);
 
 function normalize(entry) {
   return entry.replace(/\\/g, '/').replace(/^\.?\//, '');
@@ -820,6 +946,10 @@ const javaScriptEntries = entries.filter(entry => entry.endsWith('.js'));
 const residualGateMatches = [];
 const allJavaScriptContent = [];
 let fastModeSelectorPatched = false;
+let fastModeUsesAdditionalSpeedTiers = false;
+let fastModeServiceTierOptionsPatched = false;
+let contextUsageStatusSectionSeen = false;
+let contextUsageStatusSectionPatched = false;
 let bundledBrowserPluginsPatched = false;
 let bundledRuntimePluginsPatched = false;
 let browserUseDescriptorPatched = false;
@@ -832,26 +962,34 @@ let codexMobileAuthReloginPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
 const settingsRouteResiduals = [];
 const localeSourceResiduals = [];
+const fastModeServiceTierOptionsResiduals = [];
+const contextUsageStatusSectionResiduals = [];
 
 for (const entry of javaScriptEntries) {
   const content = asar.extractFile(asarPath, entryMap.get(entry)).toString('utf8');
   allJavaScriptContent.push(content);
-  fastModeSelectorPatched ||= content.includes('/*codex-offline:fast-mode-selector*/');
-  bundledBrowserPluginsPatched ||= content.includes('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
-  bundledRuntimePluginsPatched ||= content.includes('/*codex-offline:bundled-runtime-plugins*/');
-  windowsBrowserUseCapabilityPatched ||= content.includes('/*codex-offline:windows-browser-use-capability*/');
-  pluginsApiKeyNavPatched ||= content.includes('/*codex-offline:plugins-api-key-nav*/');
-  pluginsApiKeyRoutePatched ||= content.includes('/*codex-offline:plugins-api-key-route*/');
+  fastModeSelectorPatched ||= content.includes(FAST_MODE_SELECTOR_PATCH_MARKER);
+  fastModeServiceTierOptionsPatched ||=
+    content.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER);
+  contextUsageStatusSectionSeen ||=
+    content.includes(CONTEXT_USAGE_STATUS_SECTION_KEY) ||
+    content.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER);
+  contextUsageStatusSectionPatched ||=
+    contextUsageStatusSectionPatchedRe.test(content);
+  fastModeUsesAdditionalSpeedTiers ||=
+    content.includes('additionalSpeedTiers') &&
+    content.includes('canUseFastMode');
+  bundledBrowserPluginsPatched ||= content.includes(BUNDLED_BROWSER_PLUGINS_PATCH_MARKER);
+  bundledRuntimePluginsPatched ||= content.includes(BUNDLED_RUNTIME_PLUGINS_PATCH_MARKER);
+  windowsBrowserUseCapabilityPatched ||= content.includes(WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER);
+  pluginsApiKeyNavPatched ||= content.includes(PLUGINS_API_KEY_NAV_PATCH_MARKER);
+  pluginsApiKeyRoutePatched ||= content.includes(PLUGINS_API_KEY_ROUTE_PATCH_MARKER);
   codexMobileRemoteControlMfaEndpointSeen ||= content.includes(CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT);
   codexMobileAuthReloginPatched ||= content.includes(CODEX_MOBILE_AUTH_RELOGIN_MARKER);
   browserUseDescriptorPatched ||=
-    /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.Nn\([A-Za-z_$][\w$]*\.Dn\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/.test(content);
-  bundledBrowserPluginDescriptorSeen ||= browserUseDescriptorPatched;
-  if (
-    /forceReload:!0,installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>[A-Za-z_$][\w$]*\.inAppBrowserUseAllowed/.test(content) ||
-    /forceReload:!0,(?:installWhenMissing:!0,)?name:lt,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>[A-Za-z_$][\w$]*\.externalBrowserUseAllowed&&/.test(content) ||
-    /forceReload:!0,name:[A-Za-z_$][\w$]*\.On,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>/.test(content)
-  ) {
+    /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/.test(content);
+  bundledBrowserPluginDescriptorSeen ||= browserUseDescriptorPatched || bundledBrowserPluginsPatched;
+  if (bundledBrowserPluginForceReloadRe.test(content)) {
     bundledBrowserPluginDescriptorSeen = true;
     bundledBrowserPluginForceReloadResiduals.push(entry);
   }
@@ -860,6 +998,19 @@ for (const entry of javaScriptEntries) {
   }
   if (content.includes(LOCALE_SOURCE_BAD_PATTERN)) {
     localeSourceResiduals.push(entry);
+  }
+  if (
+    fastModeServiceTierOptionsResidualRe.test(content) &&
+    !content.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER)
+  ) {
+    fastModeServiceTierOptionsResiduals.push(entry);
+  }
+  if (
+    content.includes(CONTEXT_USAGE_STATUS_SECTION_KEY) &&
+    contextUsageStatusSectionResidualRe.test(content) &&
+    !content.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER)
+  ) {
+    contextUsageStatusSectionResiduals.push(entry);
   }
   const matchedGateIds = KNOWN_RAW_GATE_IDS.filter(gateId => content.includes('`' + gateId + '`'));
   if (matchedGateIds.length > 0) {
@@ -911,11 +1062,46 @@ const hasFastModeAvailabilityHelper = allJavaScriptContent.some(content =>
 if (hasFastModeAvailabilityHelper && !fastModeSelectorPatched) {
   throw new Error('Fast mode selector availability helper is present but was not patched.');
 }
+const hasFastModeAuthMethodResidual = allJavaScriptContent.some(content =>
+  content.includes(`featureRequirements?.${FAST_MODE_CONTRACT.featureKey}`) &&
+  content.includes('authMethod!==`chatgpt`') &&
+  !content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)
+);
+if (hasFastModeAuthMethodResidual) {
+  throw new Error('Fast mode auth-method availability branch is present but was not patched.');
+}
+const hasFastModeHookResidual = allJavaScriptContent.some(content =>
+  /canUseFastMode:[A-Za-z_$][\w$]*,isDisabledByRequirement:[A-Za-z_$][\w$]*,isLoading:[A-Za-z_$][\w$]*/.test(content) &&
+  content.includes(`featureRequirements?.${FAST_MODE_CONTRACT.featureKey}`) &&
+  !content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)
+);
+if (hasFastModeHookResidual) {
+  throw new Error('Fast mode hook still depends on model metadata without the offline override marker.');
+}
+if (
+  fastModeUsesAdditionalSpeedTiers &&
+  fastModeServiceTierOptionsResiduals.length > 0
+) {
+  throw new Error(
+    'Fast mode uses additionalSpeedTiers metadata, but service-tier option builders still ' +
+    'read only model.serviceTiers: ' +
+    fastModeServiceTierOptionsResiduals.join(', ')
+  );
+}
+if (contextUsageStatusSectionResiduals.length > 0) {
+  throw new Error(
+    'Context usage status section still defaults to hidden: ' +
+    contextUsageStatusSectionResiduals.join(', ')
+  );
+}
+if (contextUsageStatusSectionSeen && !contextUsageStatusSectionPatched) {
+  throw new Error(
+    'Context usage status section is present, but the default-visible offline patch was not found.'
+  );
+}
 
 const hasDesktopFeatureAvailability = allJavaScriptContent.some(content =>
-  content.includes('computerUseNodeRepl') &&
-  content.includes('externalBrowserUse') &&
-  content.includes('inAppBrowserUse')
+  DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS.every(key => content.includes(key))
 );
 if (hasDesktopFeatureAvailability && !windowsBrowserUseCapabilityPatched) {
   throw new Error('Windows Browser Use capability override is present but was not patched.');
@@ -964,7 +1150,7 @@ if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
 console.log(`[verify-offline-package] Verified app.asar patches in ${path.basename(asarPath)}`);
 '@
 
-    node -e $verifyAsarScript -- $asarPath
+    node -e $verifyAsarScript -- $asarPath $webGatewayCapabilityContractPath
     if ($LASTEXITCODE -ne 0) {
         throw "asar verification failed with exit code $LASTEXITCODE."
     }

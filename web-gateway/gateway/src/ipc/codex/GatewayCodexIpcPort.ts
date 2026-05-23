@@ -14,6 +14,7 @@ const {
   patchStatsigDefaultFeatureSnapshot,
   patchStatsigDefaultFeatures,
 } = require("./featurePatches");
+const { DEFAULT_DESKTOP_FEATURE_STATE } = require("./capabilityContract");
 const { createAutomationIpcHandlers } = require("./automations");
 const { createTerminalIpcHandlers } = require("./terminal");
 const { createWorkerIpcHandlers } = require("./worker");
@@ -149,6 +150,11 @@ function buildGatewayConfig() {
     homeDir: os.homedir(),
     appServer: process.env.CODEX_APP_SERVER_URL ? "remote" : "local",
     sharedObjectSnapshot: desktopState.sharedObjectSnapshotObject(),
+    capabilities: {
+      defaultDesktopFeatureState: DEFAULT_DESKTOP_FEATURE_STATE,
+      statsigDefaultFeatureOverrides: STATSIG_DEFAULT_FEATURE_OVERRIDES,
+      statsigDefaultFeaturesConfig: STATSIG_DEFAULT_FEATURES_CONFIG,
+    },
   };
 }
 

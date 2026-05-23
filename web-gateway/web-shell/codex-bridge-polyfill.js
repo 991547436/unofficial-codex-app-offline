@@ -270,11 +270,45 @@
   const MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS = 4000;
   const MOBILE_COMPOSER_MANUAL_FOCUS_MS = 900;
   const MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS = 80;
-  const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
-  const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
+  const capabilityConfig =
+    cfg.capabilities && typeof cfg.capabilities === "object" ? cfg.capabilities : {};
+  const STATSIG_DEFAULT_FEATURES_CONFIG =
+    typeof capabilityConfig.statsigDefaultFeaturesConfig === "string"
+      ? capabilityConfig.statsigDefaultFeaturesConfig
+      : "statsig_default_enable_features";
+  const FALLBACK_STATSIG_DEFAULT_FEATURE_OVERRIDES = {
+    "4166894088": true,
     guardian_approval: true,
+    fast_mode: true,
+    "410262010": true,
+    "410065390": true,
+    "4250630194": true,
+    "2679188970": true,
+    "1060282072": true,
+    "1506311413": true,
+    "2171042036": true,
+    "3903563814": true,
+    "3032432888": true,
+    browserPane: true,
+    inAppBrowserUse: true,
+    inAppBrowserUseAllowed: true,
+    externalBrowserUse: true,
+    externalBrowserUseAllowed: true,
+    computerUse: true,
+    computerUseNodeRepl: true,
+    control: true,
+    avatarOverlay: true,
     "3903742690": true,
     artifacts: true,
+  };
+  const configuredStatsigOverrides =
+    capabilityConfig.statsigDefaultFeatureOverrides &&
+    typeof capabilityConfig.statsigDefaultFeatureOverrides === "object"
+      ? capabilityConfig.statsigDefaultFeatureOverrides
+      : {};
+  const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
+    ...FALLBACK_STATSIG_DEFAULT_FEATURE_OVERRIDES,
+    ...configuredStatsigOverrides,
   };
   const clientId =
     w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;

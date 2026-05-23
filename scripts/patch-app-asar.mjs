@@ -71,6 +71,11 @@
  *    selector visible so users can switch back to Standard after selecting
  *    Fast.
  *
+ * 35b. Show context usage status by default for offline builds
+ *    The /status command toggles a local status section containing context
+ *    usage.  Offline builds should expose it by default so users do not lose
+ *    the conversation usage indicator.
+ *
  * 36. Keep bundled browser plugins in the runtime marketplace
  *    Newer builds materialize only plugins whose feature availability checks
  *    are true. In offline/API mode browser feature flags can be false even
@@ -134,6 +139,28 @@ import crypto from 'crypto';
 const require = createRequire(import.meta.url);
 const asar = require('@electron/asar');
 const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
+const {
+  DESKTOP_ASAR_PATCH_MARKERS,
+  DESKTOP_BROWSER_USE_CAPABILITY_KEYS,
+  CONTEXT_USAGE_CONTRACT,
+  FAST_MODE_CONTRACT,
+} = require('../web-gateway/gateway/src/ipc/codex/capabilityContractData.cjs');
+
+const DESKTOP_ASAR_PATCH_MARKER_SET = new Set(DESKTOP_ASAR_PATCH_MARKERS);
+
+function contractPatchMarker(marker) {
+  if (!DESKTOP_ASAR_PATCH_MARKER_SET.has(marker)) {
+    throw new Error(`Patch marker is not declared in capabilityContractData.cjs: ${marker}`);
+  }
+  return marker;
+}
+
+function minifiedTrueProperties(keys) {
+  return keys.map(key => `${key}:!0`).join(',');
+}
+
+const DESKTOP_BROWSER_USE_CAPABILITY_PATCH_FIELDS =
+  minifiedTrueProperties(DESKTOP_BROWSER_USE_CAPABILITY_KEYS);
 
 // ── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -285,12 +312,15 @@ function patchBundledBrowserPlugins(filePaths, options) {
   for (const filePath of filePaths) {
     let content = fs.readFileSync(filePath, 'utf8');
     const originalContent = content;
+    options.syncExternalBrowserDescriptorRe.lastIndex = 0;
     const fileSeen =
       options.chromeDescriptorRe.test(originalContent) ||
       options.browserUseDescriptorRe.test(originalContent) ||
+      options.syncExternalBrowserDescriptorRe.test(originalContent) ||
       options.inAppBrowserDescriptorRe.test(originalContent) ||
       options.chromeDescriptorPatchedRe.test(originalContent) ||
       options.browserUseDescriptorPatchedRe.test(originalContent) ||
+      options.syncExternalBrowserDescriptorPatchedRe.test(originalContent) ||
       options.inAppBrowserDescriptorPatchedRe.test(originalContent);
     seen ||= fileSeen;
 
@@ -310,7 +340,26 @@ function patchBundledBrowserPlugins(filePaths, options) {
     if (options.browserUseDescriptorRe.test(content)) {
       content = content.replace(
         options.browserUseDescriptorRe,
-        `{autoInstallOptOutKey:$2.Nn($2.Dn),installWhenMissing:!0,name:$2.Dn,isAvailable:({features:$3})=>${options.patchMarker}!0$5`,
+        `{autoInstallOptOutKey:$2.$3($2.$4),installWhenMissing:!0,name:$2.$4,isAvailable:({features:$5})=>${options.patchMarker}!0$7`,
+      );
+    }
+
+    options.syncExternalBrowserDescriptorRe.lastIndex = 0;
+    if (options.syncExternalBrowserDescriptorRe.test(content)) {
+      options.syncExternalBrowserDescriptorRe.lastIndex = 0;
+      content = content.replace(
+        options.syncExternalBrowserDescriptorRe,
+        (
+          _match,
+          nameExpr,
+          params,
+          _featuresVar,
+          closingBrace,
+        ) => (
+          `{installWhenMissing:!0,name:${nameExpr},` +
+          'syncInstallStateWithChromeExtension:!0,' +
+          `isAvailable:({${params}})=>${options.patchMarker}!0${closingBrace}`
+        ),
       );
     }
 
@@ -1086,22 +1135,26 @@ try {
   const APP_SERVER_SANDBOX_OVERRIDE_REPLACEMENT =
     'args:[`-c`,`windows.sandbox=\'unelevated\'`,`app-server`,`--analytics-default-enabled`]';
   const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER =
-    '/*codex-offline:windows-browser-use-capability*/';
+    contractPatchMarker('/*codex-offline:windows-browser-use-capability*/');
   const WINDOWS_BROWSER_USE_CAPABILITY_LEGACY_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return\s+\4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/;
   const WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{((?:buildFlavor:[A-Za-z_$][\w$]*=[^,}]+,)?env:([A-Za-z_$][\w$]*)=[^,}]+,platform:([A-Za-z_$][\w$]*)=[^,}]+)\}=\{\}\)\{let ([A-Za-z_$][\w$]*)=\5===`win32`&&\4\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}:\2,/;
   // ── Patch 36: Keep bundled browser plugins in runtime marketplace ─────
   const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER =
-    '/*codex-offline:bundled-browser-plugins-no-force-reload*/';
+    contractPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
   const CHROME_DESCRIPTOR_RE =
     /(\{forceReload:!0,)(?:installWhenMissing:!0,)?(name:lt,isAvailable:\(\{buildFlavor:([A-Za-z_$][\w$]*),features:([A-Za-z_$][\w$]*)\}\)=>)(\4\.externalBrowserUseAllowed&&Yn\(\3\))(\})/;
   const CHROME_DESCRIPTOR_PATCHED_RE =
     /\{installWhenMissing:!0,name:lt,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
   const BROWSER_USE_DESCRIPTOR_RE =
-    /(\{autoInstallOptOutKey:([A-Za-z_$][\w$]*)\.Nn\(\2\.Dn\),forceReload:!0,installWhenMissing:!0,name:\2\.Dn,isAvailable:\(\{features:([A-Za-z_$][\w$]*)\}\)=>)(\3\.inAppBrowserUseAllowed)(,migrate:([A-Za-z_$][\w$]*)\})/;
+    /(\{autoInstallOptOutKey:([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\(\2\.([A-Za-z_$][\w$]*)\),forceReload:!0,installWhenMissing:!0,name:\2\.\4,isAvailable:\(\{features:([A-Za-z_$][\w$]*)\}\)=>)(\5\.inAppBrowserUseAllowed)(,migrate:([A-Za-z_$][\w$]*)\})/;
   const BROWSER_USE_DESCRIPTOR_PATCHED_RE =
-    /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.Nn\([A-Za-z_$][\w$]*\.Dn\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.Dn,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/;
+    /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/;
+  const SYNC_EXTERNAL_BROWSER_DESCRIPTOR_RE =
+    /\{forceReload:!0,name:([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?),syncInstallStateWithChromeExtension:!0,isAvailable:\(\{(buildFlavor:[A-Za-z_$][\w$]*(?:,env:[A-Za-z_$][\w$]*)?,features:([A-Za-z_$][\w$]*))\}\)=>(?:(?:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*)?\)&&\3\.externalBrowserUseAllowed)|(?:\3\.externalBrowserUseAllowed&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)))(\})/g;
+  const SYNC_EXTERNAL_BROWSER_DESCRIPTOR_PATCHED_RE =
+    /\{installWhenMissing:!0,name:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?,syncInstallStateWithChromeExtension:!0,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*(?:,env:[A-Za-z_$][\w$]*)?,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
   const IN_APP_BROWSER_DESCRIPTOR_RE =
     /(\{forceReload:!0,name:([A-Za-z_$][\w$]*)\.On,isAvailable:\(\{buildFlavor:([A-Za-z_$][\w$]*),features:([A-Za-z_$][\w$]*)\}\)=>)(Jn\(\3\)&&\4\.externalBrowserUseAllowed)(\})/;
   const IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE =
@@ -1334,18 +1387,14 @@ try {
         WINDOWS_BROWSER_USE_CAPABILITY_LEGACY_RE,
         'function $1($2,{env:$3=process.env,platform:$4=process.platform}={}){' +
           'return $4!==`win32`||$3.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?$2:' +
-          '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
-          'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
-          `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}}`,
+          `{...$2,${DESKTOP_BROWSER_USE_CAPABILITY_PATCH_FIELDS}${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}}`,
       );
     } else if (WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE.test(content)) {
       content = content.replace(
         WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE,
         'function $1($2,{$3}={}){' +
           'let $6=$5===`win32`&&$4.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`?' +
-          '{...$2,browserPane:!0,inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,' +
-          'externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:!0,' +
-          `computerUseNodeRepl:!0${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}:$2,`,
+          `{...$2,${DESKTOP_BROWSER_USE_CAPABILITY_PATCH_FIELDS}${WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER}}:$2,`,
       );
     } else {
       continue;
@@ -1377,6 +1426,8 @@ try {
     inAppBrowserDescriptorPatchedRe: IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE,
     inAppBrowserDescriptorRe: IN_APP_BROWSER_DESCRIPTOR_RE,
     patchMarker: BUNDLED_BROWSER_PLUGINS_PATCH_MARKER,
+    syncExternalBrowserDescriptorPatchedRe: SYNC_EXTERNAL_BROWSER_DESCRIPTOR_PATCHED_RE,
+    syncExternalBrowserDescriptorRe: SYNC_EXTERNAL_BROWSER_DESCRIPTOR_RE,
   });
 
   if (bundledBrowserPluginsPatch.patchedFiles.length > 0) {
@@ -1857,15 +1908,57 @@ try {
   // after Fast is selected, hiding the only UI that can switch back to
   // Standard.  Patch only the selector visibility helper; the service-tier
   // setter still writes null/"fast" exactly as upstream does.
-  const FAST_MODE_STORE_MARKER = 'statsig_default_enable_features';
-  const FAST_MODE_KEY_MARKER = 'fast_mode';
-  const FAST_MODE_SELECTOR_PATCH_MARKER = '/*codex-offline:fast-mode-selector*/';
+  const FAST_MODE_STORE_MARKER = FAST_MODE_CONTRACT.statsigStoreKey;
+  const FAST_MODE_KEY_MARKER = FAST_MODE_CONTRACT.featureKey;
+  const FAST_MODE_SELECTOR_PATCH_MARKER =
+    contractPatchMarker(FAST_MODE_CONTRACT.selectorPatchMarker);
+  const FAST_MODE_AUTH_METHOD_PATCH_MARKER =
+    contractPatchMarker(FAST_MODE_CONTRACT.authMethodPatchMarker);
+  const FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER =
+    contractPatchMarker(FAST_MODE_CONTRACT.serviceTierOptionsPatchMarker);
   // Matches: X?.fast_mode===!0&&Y(Z)  or  X.fast_mode===!0&&Y(Z)
   const FAST_MODE_GATE_RE =
     /[$\w]+(?:\?\.|\.)fast_mode===!0&&[$\w]+\([$\w]+\)/;
-  const FAST_MODE_AVAILABILITY_MARKERS = ['additionalSpeedTiers', 'canUseFastMode'];
+  const FAST_MODE_AVAILABILITY_MARKERS = Array.from(FAST_MODE_CONTRACT.availabilityMarkers);
   const FAST_MODE_AVAILABILITY_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return\s+[A-Za-z_$][\w$]*\(\2\)\.canUseFastMode\}/;
+  const FAST_MODE_AUTH_METHOD_RE =
+    /return!\(([A-Za-z_$][\w$]*)\?\.authMethod!==`chatgpt`\|\|([A-Za-z_$][\w$]*)\)\}/g;
+  const FAST_MODE_HOOK_AUTH_METHOD_RE =
+    /if\(([A-Za-z_$][\w$]*)\?\.authMethod!==`chatgpt`\|\|([A-Za-z_$][\w$]*)\)\{/g;
+  const FAST_MODE_HOOK_CAN_USE_RE =
+    /canUseFastMode:([A-Za-z_$][\w$]*),isDisabledByRequirement:([A-Za-z_$][\w$]*),isLoading:([A-Za-z_$][\w$]*)/g;
+  const FAST_MODE_SERVICE_TIER_GET_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{return \3==null\?null:\3===`fast`\?([A-Za-z_$][\w$]*)\(\2\):\2\?\.serviceTiers\?\.find\(([A-Za-z_$][\w$]*)=>\5\.id===\3\)\?\?null\}/;
+  const FAST_MODE_SERVICE_TIER_OPTIONS_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return\[\{description:([A-Za-z_$][\w$]*)\.standardDescription,iconKind:null,label:[A-Za-z_$][\w$]*\.standardLabel,tier:null,value:null\},\.\.\.\([A-Za-z_$][\w$]*\?\.serviceTiers\?\?\[\]\)\.map\(([A-Za-z_$][\w$]*)=>\(\{description:([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\),iconKind:([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\.id,[A-Za-z_$][\w$]*\.name\),label:([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\),tier:[A-Za-z_$][\w$]*,value:[A-Za-z_$][\w$]*\.id\}\)\)\]\}/;
+  const FAST_MODE_FAST_TIER_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \2\?\.serviceTiers\?\.find\(([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(\3\.id,\3\.name\)===`fast`\|\|\3\.name\.trim\(\)\.toLowerCase\(\)===`priority`\)\?\?null\}/;
+  const CONTEXT_USAGE_STATUS_SECTION_KEY =
+    CONTEXT_USAGE_CONTRACT.localStatusSectionStorageKey;
+  const CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER =
+    contractPatchMarker(CONTEXT_USAGE_CONTRACT.visibilityPatchMarker);
+  const CONTEXT_USAGE_STATUS_SECTION_PATCHED_RE = new RegExp(
+    String.raw`[A-Za-z_$][\w$]*=[$\w]+\(` +
+      '`' +
+      escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
+      '`' +
+      String.raw`,!0${escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER)}\)`,
+  );
+  const CONTEXT_USAGE_STATUS_SECTION_FALSE_RE = new RegExp(
+    String.raw`([A-Za-z_$][\w$]*=[$\w]+\(` +
+      '`' +
+      escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
+      '`' +
+      String.raw`,)!1(\))`,
+  );
+  const CONTEXT_USAGE_STATUS_SECTION_TRUE_RE = new RegExp(
+    String.raw`([A-Za-z_$][\w$]*=[$\w]+\(` +
+      '`' +
+      escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
+      '`' +
+      String.raw`,)!0(\))`,
+  );
 
   const AUTOMATION_DIALOG_CWD_PATCHES = [
     {
@@ -1987,6 +2080,12 @@ try {
     let fastModeGatePatched = false;
     let fastModeGateSeen = false;
     let fastModeGateAlreadyCorrect = false;
+    let fastModeServiceTierOptionsPatched = false;
+    let fastModeServiceTierOptionsSeen = false;
+    let fastModeServiceTierOptionsAlreadyCorrect = false;
+    let contextUsageStatusSectionPatched = false;
+    let contextUsageStatusSectionSeen = false;
+    let contextUsageStatusSectionAlreadyCorrect = false;
 
     for (const file of assetFiles) {
       if (!file.endsWith('.js')) continue;
@@ -2105,6 +2204,18 @@ try {
           FAST_MODE_AVAILABILITY_RE.test(originalContent)
         ) ||
         originalContent.includes(FAST_MODE_SELECTOR_PATCH_MARKER);
+      fastModeServiceTierOptionsSeen ||=
+        FAST_MODE_SERVICE_TIER_GET_RE.test(originalContent) ||
+        FAST_MODE_SERVICE_TIER_OPTIONS_RE.test(originalContent) ||
+        FAST_MODE_FAST_TIER_RE.test(originalContent) ||
+        originalContent.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER);
+      fastModeServiceTierOptionsAlreadyCorrect ||=
+        originalContent.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER);
+      contextUsageStatusSectionSeen ||=
+        originalContent.includes(CONTEXT_USAGE_STATUS_SECTION_KEY) ||
+        originalContent.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER);
+      contextUsageStatusSectionAlreadyCorrect ||=
+        originalContent.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER);
       if (content.includes(I18N_NEEDLE)) {
         const count = content.split(I18N_NEEDLE).length - 1;
         content = content.replaceAll(I18N_NEEDLE, I18N_REPLACEMENT);
@@ -2819,6 +2930,126 @@ try {
         fastModeGatePatched = true;
         modified = true;
       }
+      if (content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)) {
+        fastModeGateAlreadyCorrect = true;
+      } else if (
+        content.includes(FAST_MODE_KEY_MARKER) &&
+        content.includes('authMethod!==`chatgpt`')
+      ) {
+        let patchedFastModeContent = content.replace(
+          FAST_MODE_AUTH_METHOD_RE,
+          (_match, _authMethodVar, disabledRequirementVar) =>
+            `return ${disabledRequirementVar}!==!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER}}`,
+        );
+        patchedFastModeContent = patchedFastModeContent.replace(
+          FAST_MODE_HOOK_AUTH_METHOD_RE,
+          (_match, _authMethodVar, disabledRequirementVar) =>
+            `if(${disabledRequirementVar}===!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER}){`,
+        );
+        patchedFastModeContent = patchedFastModeContent.replace(
+          FAST_MODE_HOOK_CAN_USE_RE,
+          (_match, _canUseVar, disabledRequirementVar, isLoadingVar) =>
+            `canUseFastMode:!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER},` +
+            `isDisabledByRequirement:${disabledRequirementVar},isLoading:${isLoadingVar}`,
+        );
+        if (patchedFastModeContent !== content) {
+          content = patchedFastModeContent;
+          fastModeGatePatched = true;
+          modified = true;
+        }
+      }
+      if (content.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER)) {
+        fastModeServiceTierOptionsAlreadyCorrect = true;
+      } else if (
+        FAST_MODE_SERVICE_TIER_GET_RE.test(content) &&
+        FAST_MODE_SERVICE_TIER_OPTIONS_RE.test(content) &&
+        FAST_MODE_FAST_TIER_RE.test(content)
+      ) {
+        let patchedFastModeServiceTierContent = content.replace(
+          FAST_MODE_SERVICE_TIER_GET_RE,
+          (
+            _match,
+            getTierFunction,
+            modelVar,
+            valueVar,
+            getFastTierFunction,
+            itemVar,
+          ) =>
+            `function ${getTierFunction}(${modelVar},${valueVar}){` +
+            `return ${valueVar}==null?null:` +
+            `${valueVar}===\`fast\`?${getFastTierFunction}(${modelVar}):` +
+            `${modelVar}?.serviceTiers?.find(${itemVar}=>${itemVar}.id===${valueVar})??` +
+            `codexOfflineFastModeTier(${modelVar},${valueVar})}`,
+        );
+        patchedFastModeServiceTierContent = patchedFastModeServiceTierContent.replace(
+          FAST_MODE_SERVICE_TIER_OPTIONS_RE,
+          (
+            _match,
+            getOptionsFunction,
+            modelVar,
+            labelsVar,
+            itemVar,
+            descriptionFunction,
+            iconKindFunction,
+            labelFunction,
+          ) =>
+            `function ${getOptionsFunction}(${modelVar}){` +
+            `let codexOfflineFastModeOptions=codexOfflineFastModeTierOptions(${modelVar});` +
+            `return[{description:${labelsVar}.standardDescription,iconKind:null,` +
+            `label:${labelsVar}.standardLabel,tier:null,value:null},` +
+            `...codexOfflineFastModeOptions.map(${itemVar}=>({description:${descriptionFunction}(${itemVar}),` +
+            `iconKind:${iconKindFunction}(${itemVar}.id,${itemVar}.name),` +
+            `label:${labelFunction}(${itemVar}),tier:${itemVar},value:${itemVar}.id}))]}` +
+            `function codexOfflineFastModeTier(e,t){` +
+            `return t===\`fast\`&&e?.additionalSpeedTiers?.includes(\`fast\`)===!0?` +
+            `{id:\`fast\`,name:\`Fast\`,description:${labelsVar}.fastDescription}:` +
+            `t===\`ultrafast\`&&e?.additionalSpeedTiers?.includes(\`ultrafast\`)===!0?` +
+            `{id:\`ultrafast\`,name:\`Ultrafast\`,description:${labelsVar}.ultrafastDescription}:null}` +
+            `function codexOfflineFastModeTierOptions(e){` +
+            `let t=e?.serviceTiers??[],n=[...t],r=e?.additionalSpeedTiers??[];` +
+            `for(let i of r)(i===\`fast\`||i===\`ultrafast\`)&&!n.some(e=>` +
+            `${iconKindFunction}(e.id,e.name)===i||e.id===i)&&` +
+            `n.push(codexOfflineFastModeTier(e,i));return n.filter(Boolean)}` +
+            FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER,
+        );
+        patchedFastModeServiceTierContent = patchedFastModeServiceTierContent.replace(
+          FAST_MODE_FAST_TIER_RE,
+          (
+            _match,
+            getFastTierFunction,
+            modelVar,
+            itemVar,
+            iconKindFunction,
+          ) =>
+            `function ${getFastTierFunction}(${modelVar}){` +
+            `return ${modelVar}?.serviceTiers?.find(${itemVar}=>` +
+            `${iconKindFunction}(${itemVar}.id,${itemVar}.name)===\`fast\`||` +
+            `${itemVar}.name.trim().toLowerCase()===\`priority\`)??` +
+            `codexOfflineFastModeTier(${modelVar},\`fast\`)}`,
+        );
+        if (patchedFastModeServiceTierContent !== content) {
+          content = patchedFastModeServiceTierContent;
+          fastModeServiceTierOptionsPatched = true;
+          modified = true;
+        }
+      }
+      if (CONTEXT_USAGE_STATUS_SECTION_PATCHED_RE.test(content)) {
+        contextUsageStatusSectionAlreadyCorrect = true;
+      } else if (CONTEXT_USAGE_STATUS_SECTION_FALSE_RE.test(content)) {
+        content = content.replace(
+          CONTEXT_USAGE_STATUS_SECTION_FALSE_RE,
+          `$1!0${CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER}$2`,
+        );
+        contextUsageStatusSectionPatched = true;
+        modified = true;
+      } else if (CONTEXT_USAGE_STATUS_SECTION_TRUE_RE.test(content)) {
+        content = content.replace(
+          CONTEXT_USAGE_STATUS_SECTION_TRUE_RE,
+          `$1!0${CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER}$2`,
+        );
+        contextUsageStatusSectionPatched = true;
+        modified = true;
+      }
 
       for (const patch of AUTOMATION_DIALOG_CWD_PATCHES) {
         if (content.includes(patch.patchMarker)) {
@@ -3332,6 +3563,32 @@ try {
       warn(
         'Fast mode selector gate is still present, but no supported ' +
         'patch pattern matched. The Fast mode speed selector may be hidden in offline builds.',
+      );
+    }
+
+    if (fastModeServiceTierOptionsPatched) {
+      log('Fast mode service-tier options patched for additionalSpeedTiers metadata.');
+    } else if (fastModeServiceTierOptionsAlreadyCorrect) {
+      log('Fast mode service-tier options already patched in this app version. No patch needed.');
+    } else if (!fastModeServiceTierOptionsSeen) {
+      log('Fast mode service-tier options builder is not present in this app version. No patch needed.');
+    } else {
+      throw new Error(
+        'Fast mode service-tier options builder is present, but no supported ' +
+        'patch pattern matched. The composer speed menu may be hidden in offline builds.',
+      );
+    }
+
+    if (contextUsageStatusSectionPatched) {
+      log('Context usage status section visibility patched for offline mode.');
+    } else if (contextUsageStatusSectionAlreadyCorrect) {
+      log('Context usage status section visibility already patched in this app version. No patch needed.');
+    } else if (!contextUsageStatusSectionSeen) {
+      log('Context usage status section is not present in this app version. No patch needed.');
+    } else {
+      throw new Error(
+        'Context usage status section is present, but no supported visibility ' +
+        'patch pattern matched. The context usage indicator may be hidden in offline builds.',
       );
     }
 

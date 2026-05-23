@@ -1,16 +1,10 @@
 // @ts-nocheck
 export {};
 
-const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
-
-const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
-  // Settings entry is bundled, but upstream hides it when this remote gate is false/unavailable.
-  "4166894088": true,
-  guardian_approval: true,
-  // 开启官方右侧 artifact/file preview pane，renderer 才会渲染原生预览入口。
-  "3903742690": true,
-  artifacts: true,
-};
+const {
+  STATSIG_DEFAULT_FEATURE_OVERRIDES,
+  STATSIG_DEFAULT_FEATURES_CONFIG,
+} = require("./capabilityContract");
 const APP_SERVER_UNSUPPORTED_FEATURE_ENABLEMENTS = new Set([
   "auth_elicitation",
   "enable_mcp_apps",
