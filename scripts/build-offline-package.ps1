@@ -487,6 +487,165 @@ function Add-OfflineRuntimePlugins {
     return $pluginInfo
 }
 
+function Repair-EncodedScopedNodeModules {
+    param([Parameter(Mandatory = $true)][string]$RootPath)
+
+    if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return @()
+    }
+
+    $repaired = @()
+    $nodeModulesRoots = @(Get-ChildItem -LiteralPath $RootPath -Directory -Filter 'node_modules' -Recurse -ErrorAction SilentlyContinue)
+    foreach ($nodeModulesRoot in $nodeModulesRoots) {
+        $encodedDirectories = @(
+            Get-ChildItem -LiteralPath $nodeModulesRoot.FullName -Directory -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name.Contains('%40') } |
+                Sort-Object { $_.FullName.Length } -Descending
+        )
+        foreach ($encodedDirectory in $encodedDirectories) {
+            if (-not (Test-Path -LiteralPath $encodedDirectory.FullName -PathType Container)) {
+                continue
+            }
+
+            $targetName = $encodedDirectory.Name.Replace('%40', '@')
+            $targetPath = Join-Path $encodedDirectory.Parent.FullName $targetName
+            if (Test-Path -LiteralPath $targetPath) {
+                continue
+            }
+
+            Move-Item -LiteralPath $encodedDirectory.FullName -Destination $targetPath
+            $repaired += [ordered]@{
+                from = $encodedDirectory.FullName
+                to = $targetPath
+            }
+        }
+    }
+
+    return $repaired
+}
+
+function Repair-ComputerUseClientNativePipeFallback {
+    param([Parameter(Mandatory = $true)][string]$RootPath)
+
+    if (-not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return @()
+    }
+
+    $clientPaths = @(
+        Get-ChildItem -LiteralPath $RootPath -Recurse -File -Filter 'computer-use-client.mjs' -ErrorAction SilentlyContinue
+    )
+    $repaired = @()
+    foreach ($clientPath in $clientPaths) {
+        $content = (Get-Content -LiteralPath $clientPath.FullName -Raw).Replace("`r`n", "`n")
+        if ($content.Contains('codex-offline:computer-use-native-pipe-fallback')) {
+            continue
+        }
+
+        $oldImport = 'import { endianness, platform } from "node:os";'
+        $newImport = "import { readdirSync } from `"node:fs`";`n$oldImport"
+        $oldCreate = (@'
+    const pipePath = getComputerUsePipePath();
+    let transport = null;
+    try {
+      const socket = await nativePipe.createConnection(pipePath);
+      transport = new NativePipeComputerUseTransport(socket);
+      await transport.request("list_windows", {});
+      return transport;
+    } catch (error) {
+      await transport?.close().catch(() => {});
+      throw new Error(
+        `Computer Use native pipe is unavailable: ${formatErrorMessage(error)}`,
+      );
+    }
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newCreate = (@'
+    const pipePaths = getComputerUsePipePaths();
+    let lastError = null;
+    for (const pipePath of pipePaths) {
+      let transport = null;
+      try {
+        const socket = await nativePipe.createConnection(pipePath);
+        transport = new NativePipeComputerUseTransport(socket);
+        await transport.request("list_windows", {});
+        return transport;
+      } catch (error) {
+        lastError = error;
+        await transport?.close().catch(() => {});
+      }
+    }
+
+    throw new Error(
+      `Computer Use native pipe is unavailable: ${formatErrorMessage(lastError)}`,
+    );
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $oldFunction = (@'
+function getComputerUsePipePath() {
+  const nativePipeDirectory =
+    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+  if (typeof nativePipeDirectory === "string") {
+    const trimmed = nativePipeDirectory.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  throw new Error("Computer Use native pipe path is unavailable");
+}
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newFunction = (@'
+function getComputerUsePipePaths() {
+  const paths = [];
+  const nativePipeDirectory =
+    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+  if (typeof nativePipeDirectory === "string") {
+    const trimmed = nativePipeDirectory.trim();
+    if (trimmed) {
+      paths.push(trimmed);
+    }
+  }
+
+  for (const discoveredPipePath of discoverComputerUsePipePaths()) {
+    if (!paths.includes(discoveredPipePath)) {
+      paths.push(discoveredPipePath);
+    }
+  }
+  if (paths.length > 0) {
+    return paths;
+  }
+
+  throw new Error("Computer Use native pipe path is unavailable");
+}
+
+function discoverComputerUsePipePaths() {
+  // codex-offline:computer-use-native-pipe-fallback
+  try {
+    return readdirSync("\\\\.\\pipe\\")
+      .filter((entry) => /^codex-computer-use-[0-9a-f-]{36}$/i.test(entry))
+      .map((entry) => `\\\\.\\pipe\\${entry}`);
+  } catch {
+    return [];
+  }
+}
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+
+        if (
+            -not $content.Contains($oldImport) -or
+            -not $content.Contains($oldCreate) -or
+            -not $content.Contains($oldFunction)
+        ) {
+            continue
+        }
+
+        $content = $content.Replace($oldImport, $newImport)
+        $content = $content.Replace($oldCreate, $newCreate)
+        $content = $content.Replace($oldFunction, $newFunction)
+        Set-Content -LiteralPath $clientPath.FullName -Value $content -Encoding UTF8 -NoNewline
+        $repaired += $clientPath.FullName
+    }
+
+    return $repaired
+}
+
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $configFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $ConfigPath
@@ -555,6 +714,14 @@ $offlineRuntimePluginInfo = Add-OfflineRuntimePlugins `
     -MarketplaceSourceRoot $primaryRuntimePluginSource.marketplaceRoot `
     -PluginNames $offlineRuntimePluginNames
 Write-BuildTrace 'Offline runtime plugins bundled.'
+$encodedScopeRepairs = Repair-EncodedScopedNodeModules -RootPath (Join-Path $internalRoot 'app/resources/plugins')
+if (@($encodedScopeRepairs).Count -gt 0) {
+    Write-BuildTrace "Repaired encoded scoped node_modules directories ($(@($encodedScopeRepairs).Count))."
+}
+$computerUseClientRepairs = Repair-ComputerUseClientNativePipeFallback -RootPath (Join-Path $internalRoot 'app/resources/plugins/openai-bundled/plugins/computer-use')
+if (@($computerUseClientRepairs).Count -gt 0) {
+    Write-BuildTrace "Repaired Computer Use native pipe fallback ($(@($computerUseClientRepairs).Count))."
+}
 
 $chromeExtensionInfo = $null
 $chromeExtensionConfig = Get-ChromeExtensionConfig -AppRoot (Join-Path $internalRoot 'app')

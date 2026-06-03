@@ -100,7 +100,15 @@ function Sync-PatchedChromePluginCache {
         (Join-Path $codexHome '.tmp\bundled-marketplaces\openai-bundled\plugins\chrome')
     ) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
 
-    foreach ($relativePath in @('scripts\browser-client.mjs', 'scripts\check-native-host-manifest.js', 'skills\chrome\SKILL.md')) {
+    $relativePaths = @('scripts\browser-client.mjs', 'scripts\check-native-host-manifest.js')
+    $skillPath = Get-ChildItem -Path (Join-Path $ChromePluginRoot 'skills') -Filter 'SKILL.md' -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -LiteralPath $_.FullName -Raw).Contains('scripts/browser-client.mjs') } |
+        Select-Object -First 1
+    if ($null -ne $skillPath) {
+        $relativePaths += ('skills\{0}\SKILL.md' -f $skillPath.Directory.Name)
+    }
+
+    foreach ($relativePath in $relativePaths) {
         $sourcePath = Join-Path $ChromePluginRoot $relativePath
         foreach ($pluginRoot in $pluginRoots) {
             $destinationPath = Join-Path $pluginRoot $relativePath

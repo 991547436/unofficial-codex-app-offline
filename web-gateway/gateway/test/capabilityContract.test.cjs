@@ -1,8 +1,10 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
 const contract = require("../dist/ipc/codex/capabilityContract.js");
+const { filterUnsupportedFeatureEnablements } = require("../dist/ipc/codex/featurePatches.js");
 const { makeHandlers } = require("../dist/ipc/codex/GatewayCodexIpcPort.js");
 const contractData = require("../src/ipc/codex/capabilityContractData.cjs");
 
@@ -79,6 +81,54 @@ test("capability contract provides verifier marker lists", () => {
   }
 });
 
+test("feature enablement refresh leaves supported entries unchanged", () => {
+  const result = filterUnsupportedFeatureEnablements({
+    enablement: {
+      tool_suggest: true,
+    },
+  });
+
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.skipped, false);
+  assert.deepEqual(result.payload.enablement, {
+    tool_suggest: true,
+  });
+});
+
+test("feature enablement refresh drops unsupported entries without inventing app-server features", () => {
+  const result = filterUnsupportedFeatureEnablements({
+    enablement: {
+      auth_elicitation: true,
+    },
+  });
+
+  assert.deepEqual(result.removed, ["auth_elicitation"]);
+  assert.equal(result.skipped, true);
+  assert.deepEqual(result.payload.enablement, {});
+});
+
+test("source data contract declares every required desktop asar marker", () => {
+  const repoRoot = path.resolve(__dirname, "../../..");
+  const markerCalls = [
+    {
+      path: path.join(repoRoot, "scripts", "patch-app-asar.mjs"),
+      regex: /contractPatchMarker\((['"`])([^'"`]+)\1\)/g,
+    },
+    {
+      path: path.join(repoRoot, "scripts", "verify-offline-package.ps1"),
+      regex: /requiredPatchMarker\((['"`])([^'"`]+)\1\)/g,
+    },
+  ];
+  const declared = new Set(contractData.DESKTOP_ASAR_PATCH_MARKERS);
+
+  for (const markerCall of markerCalls) {
+    const source = fs.readFileSync(markerCall.path, "utf8");
+    for (const match of source.matchAll(markerCall.regex)) {
+      assert.ok(declared.has(match[2]), `${path.relative(repoRoot, markerCall.path)}: ${match[2]}`);
+    }
+  }
+});
+
 test("source data contract covers direct exe asar patch surfaces", () => {
   assert.equal(contractData.STATSIG_DEFAULT_FEATURES_CONFIG, contract.STATSIG_DEFAULT_FEATURES_CONFIG);
   assert.deepEqual(contractData.DESKTOP_BROWSER_USE_CAPABILITY_KEYS, [
@@ -112,12 +162,27 @@ test("source data contract covers direct exe asar patch surfaces", () => {
 
   for (const marker of [
     "/*codex-offline:windows-browser-use-capability*/",
+    "/*codex-offline:node-repl-feature-enabled*/",
+    "/*codex-offline:feature-overrides-preserve-mcp-config*/",
+    "/*codex-offline:feature-enablement-preserve-unified-exec*/",
+    "/*codex-offline:bundled-plugin-cache-lock-nonfatal*/",
+    "/*codex-offline:node-repl-config-reconcile-finally*/",
+    "/*codex-offline:node-repl-disable-sandbox*/",
+    "/*codex-offline:node-repl-tool-search-feature*/",
+    "/*codex-offline:computer-use-plugin-root-fallback*/",
+    "/*codex-offline:computer-use-input-mention*/",
+    "/*codex-offline:computer-use-input-mention-v2*/",
+    "/*codex-offline:computer-use-input-skill*/",
+    "/*codex-offline:computer-use-thread-start-tool-search*/",
+    "/*codex-offline:computer-use-node-repl-dynamic-tool*/",
+    "/*codex-offline:computer-use-node-repl-dynamic-tool-call*/",
     "/*codex-offline:bundled-browser-plugins-no-force-reload*/",
     "/*codex-offline:fast-mode-selector*/",
     "/*codex-offline:fast-mode-auth-method*/",
     "/*codex-offline:fast-mode-service-tier-options*/",
     "/*codex-offline:context-usage-visible*/",
     "/*codex-offline:external-agent-config-import*/",
+    "/*codex-offline:disable-auto-updater-breadcrumb*/",
   ]) {
     assert.ok(contractData.DESKTOP_ASAR_PATCH_MARKERS.includes(marker), marker);
   }
@@ -137,6 +202,7 @@ test("desktop script patcher is wired to the source data contract", () => {
   const patcherSource = require("node:fs").readFileSync(patcherPath, "utf8");
 
   assert.match(patcherSource, /capabilityContractData\.cjs/);
+  assert.match(patcherSource, /'computer-use'/);
 });
 
 test("web gateway safely no-ops external agent import channels", async () => {

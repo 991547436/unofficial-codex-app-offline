@@ -107,6 +107,14 @@
  *    preserve those local entries even though the upstream app does not ship
  *    desktop feature descriptors for them.
  *
+ * 41. Enable node_repl config for offline Computer Use
+ *    Newer desktop builds synthesize Browser Use / Computer Use MCP config
+ *    with features.js_repl disabled by default. Offline Windows builds need
+ *    that flag enabled so the bundled Computer Use skill can call its
+ *    official JavaScript entry point. The app's feature-default merge path
+ *    must also preserve mcp_servers.* config keys instead of prefixing them
+ *    as features.
+ *
  * 8. Normalize Windows automation cwd paths
  *    The packaged Automations UI can persist selected project paths in
  *    `\\?\C:\...` form on Windows.  Automation execution later compares that
@@ -207,6 +215,10 @@ function resolveMainEntry(extractDir) {
 }
 
 const PATCH_MARKER = '/* codex-offline:windowsStore-patch */';
+const DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER =
+  contractPatchMarker('/*codex-offline:disable-auto-updater-breadcrumb*/');
+const LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER =
+  '/*codex-offline:electron-namespace-no-auto-updater*/';
 const COMPUTER_USE_ENV_DEFAULT =
   'if(process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE==null){' +
     'process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE="1"' +
@@ -389,6 +401,8 @@ function patchBundledRuntimeMarketplaceFilter(filePaths, options) {
   const patchedFiles = [];
   let seen = false;
   let alreadyCorrect = false;
+  const patchedPluginListRe =
+    /for\(let (_codexOfflinePluginName) of (\[[^\]]*\])\)([A-Za-z_$][\w$]*)\.add\(\1\);/;
 
   for (const filePath of filePaths) {
     let content = fs.readFileSync(filePath, 'utf8');
@@ -396,7 +410,23 @@ function patchBundledRuntimeMarketplaceFilter(filePaths, options) {
 
     if (content.includes(options.patchMarker)) {
       seen = true;
-      alreadyCorrect = true;
+      const pluginListMatch = content.match(patchedPluginListRe);
+      const patchedPluginNames = pluginListMatch
+        ? JSON.parse(pluginListMatch[2])
+        : [];
+      if (options.pluginNames.every(pluginName => patchedPluginNames.includes(pluginName))) {
+        alreadyCorrect = true;
+        continue;
+      }
+
+      content = content.replace(
+        patchedPluginListRe,
+        `for(let $1 of ${options.pluginNamesJson})$3.add($1);`,
+      );
+      if (content !== originalContent) {
+        fs.writeFileSync(filePath, content, 'utf8');
+        patchedFiles.push(filePath);
+      }
       continue;
     }
 
@@ -471,6 +501,15 @@ function patchExternalAgentConfigGateCalls(content, patchMarker) {
   let count = 0;
 
   for (const alias of externalAgentConfigGateAliases(content)) {
+    const twoArgGateCallRe = new RegExp(
+      `(^|[^.\\w$])[$\\w]+\\([A-Za-z_$][\\w$]*\\s*,\\s*${escapeRegExp(alias)}\\)`,
+      'g',
+    );
+    next = next.replace(twoArgGateCallRe, (_match, prefix) => {
+      count += 1;
+      return `${prefix}!0${patchMarker}`;
+    });
+
     const gateCallRe = new RegExp(
       `(^|[^.\\w$])[$\\w]+\\(${escapeRegExp(alias)}\\)`,
       'g',
@@ -538,7 +577,7 @@ function patchChromePluginScripts(rootAppDir) {
 
   patchChromeBrowserClient(path.join(chromePluginRoot, 'scripts', 'browser-client.mjs'));
   patchChromeNativeHostCheck(path.join(chromePluginRoot, 'scripts', 'check-native-host-manifest.js'));
-  patchChromeSkillInstructions(path.join(chromePluginRoot, 'skills', 'chrome', 'SKILL.md'));
+  patchChromeSkillInstructions(chromePluginRoot);
 
   return crypto
     .createHash('sha256')
@@ -660,6 +699,8 @@ function patchChromeBrowserClient(filePath) {
       /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=import\.meta\.__codexNativePipeUnavailableMessage;return typeof \2=="string"&&\2\.length>0\?\2:"privileged native pipe bridge is not available; browser-client is not trusted"\}/,
     ) ?? content.match(
       /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\);return \2\?`privileged native pipe bridge is not available; browser-client is not trusted\. Load browser-client from the \$\{\2\} marketplace directory\.`:"privileged native pipe bridge is not available; browser-client is not trusted"\}/,
+    ) ?? content.match(
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)="privileged native pipe bridge is not available; browser-client is not trusted";return [A-Za-z_$][\w$]*\(\)==="production"\?\2:`\$\{\2\}[^`]*`\}/,
     );
     const platformImportMatch = content.match(
       /import [A-Za-z_$][\w$]*,\{platform as ([A-Za-z_$][\w$]*)\}from"node:os";/,
@@ -801,9 +842,10 @@ function patchChromeBrowserClient(filePath) {
       pipePrefixVar,
     ] = pipeListMatch;
     const pipeListReplacement =
-      `${listFunction}=async()=>{let ${rootVar}="\\\\\\\\.\\\\pipe\\\\",` +
-      `e=(await ${readdirFunction}(${rootVar})).map(${entryVar}=>${pathModule}.resolve(${rootVar},${entryVar})).filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar})),` +
-      `r=e.filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar}+"\\\\"));return(r.length>0?r:e)}` +
+      `${listFunction}=async()=>{let ${rootVar}="\\\\\\\\.\\\\pipe\\\\";` +
+      `let _codexOfflineBrowserUsePipes=(await ${readdirFunction}(${rootVar})).map(${entryVar}=>${pathModule}.resolve(${rootVar},${entryVar})).filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar}));` +
+      `let _codexOfflineChromePipes=_codexOfflineBrowserUsePipes.filter(${pipeVar}=>${pipeVar}.startsWith(${pipePrefixVar}+"\\\\"));` +
+      `return(_codexOfflineChromePipes.length>0?_codexOfflineChromePipes:_codexOfflineBrowserUsePipes)}` +
       chromePipeFilterPatchMarker;
     content = content.replace(pipeListNeedle, pipeListReplacement);
     changed = true;
@@ -987,9 +1029,31 @@ function patchChromeNativeHostCheck(filePath) {
   log('Chrome native host registry parser patched for localized Windows output.');
 }
 
-function patchChromeSkillInstructions(filePath) {
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Chrome skill instructions were not found: ${filePath}`);
+function findChromeSkillInstructions(chromePluginRoot) {
+  const skillsRoot = path.join(chromePluginRoot, 'skills');
+  if (!fs.existsSync(skillsRoot)) {
+    return null;
+  }
+
+  const skillPaths = [];
+  for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(skillsRoot, entry.name, 'SKILL.md');
+    if (fs.existsSync(candidate)) {
+      skillPaths.push(candidate);
+    }
+  }
+
+  return skillPaths.find(candidate => {
+    const content = fs.readFileSync(candidate, 'utf8');
+    return content.includes('scripts/browser-client.mjs');
+  }) ?? null;
+}
+
+function patchChromeSkillInstructions(chromePluginRoot) {
+  const filePath = findChromeSkillInstructions(chromePluginRoot);
+  if (!filePath) {
+    throw new Error(`Chrome skill instructions were not found under: ${chromePluginRoot}`);
   }
 
   let content = fs.readFileSync(filePath, 'utf8');
@@ -1044,6 +1108,72 @@ function patchTrustedBrowserClientHashes(filePaths, chromeBrowserClientHash) {
   return { patchedFiles, alreadyCorrect };
 }
 
+function isMissingUnpackedFileError(error) {
+  return error && error.code === 'ENOENT';
+}
+
+function isMissingElectronFuseSentinelError(error) {
+  return error instanceof Error &&
+    error.message.includes('Could not find sentinel in the provided Electron binary');
+}
+
+async function extractAsarForPatch(archivePath, destinationPath) {
+  const skippedUnpackedFiles = [];
+  const packageEntries = asar.listPackage(archivePath);
+  const followLinks = process.platform === 'win32';
+
+  fs.mkdirSync(destinationPath, { recursive: true });
+
+  for (const fullPath of packageEntries) {
+    const filename = fullPath.replace(/^[\\/]+/, '');
+    const destinationFile = path.join(destinationPath, filename);
+
+    if (path.relative(destinationPath, destinationFile).startsWith('..')) {
+      throw new Error(`${fullPath}: file "${destinationFile}" writes out of the package`);
+    }
+
+    const file = asar.statFile(archivePath, filename, followLinks);
+    if ('files' in file) {
+      fs.mkdirSync(destinationFile, { recursive: true });
+      continue;
+    }
+
+    if ('link' in file) {
+      const linkSrcPath = path.dirname(path.join(destinationPath, file.link));
+      const linkDestPath = path.dirname(destinationFile);
+      const relativePath = path.relative(linkDestPath, linkSrcPath);
+      const linkTo = path.join(relativePath, path.basename(file.link));
+
+      if (path.relative(destinationPath, linkSrcPath).startsWith('..')) {
+        throw new Error(`${fullPath}: file "${file.link}" links out of the package to "${linkSrcPath}"`);
+      }
+
+      fs.rmSync(destinationFile, { force: true });
+      fs.mkdirSync(path.dirname(destinationFile), { recursive: true });
+      fs.symlinkSync(linkTo, destinationFile);
+      continue;
+    }
+
+    try {
+      const content = asar.extractFile(archivePath, filename, followLinks);
+      fs.mkdirSync(path.dirname(destinationFile), { recursive: true });
+      fs.writeFileSync(destinationFile, content);
+      if (file.executable) {
+        fs.chmodSync(destinationFile, 0o755);
+      }
+    } catch (error) {
+      if (file.unpacked && isMissingUnpackedFileError(error)) {
+        skippedUnpackedFiles.push(filename.replaceAll(path.sep, '/'));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return { skippedUnpackedFiles };
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const asarPath = path.resolve(appDir, 'resources', 'app.asar');
@@ -1061,7 +1191,13 @@ fs.mkdirSync(tmpDir, { recursive: true });
 
 try {
   log('Extracting asar…');
-  await asar.extractAll(asarPath, tmpDir);
+  const extraction = await extractAsarForPatch(asarPath, tmpDir);
+  if (extraction.skippedUnpackedFiles.length > 0) {
+    warn(
+      'Skipped missing unpacked asar entries: ' +
+      extraction.skippedUnpackedFiles.join(', '),
+    );
+  }
 
   // Find main entry point.
   const mainEntry = resolveMainEntry(tmpDir);
@@ -1223,6 +1359,506 @@ try {
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return\s+\4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/;
   const WINDOWS_BROWSER_USE_CAPABILITY_CURRENT_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{((?:buildFlavor:[A-Za-z_$][\w$]*=[^,}]+,)?env:([A-Za-z_$][\w$]*)=[^,}]+,platform:([A-Za-z_$][\w$]*)=[^,}]+)\}=\{\}\)\{let ([A-Za-z_$][\w$]*)=\5===`win32`&&\4\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}:\2,/;
+  const NODE_REPL_FEATURE_ENABLED_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:node-repl-feature-enabled*/');
+  const NODE_REPL_FEATURE_CONFIG_RE =
+    /([A-Za-z_$][\w$]*=\{"features\.js_repl":)(!0|!1)(?:\/\*codex-offline:node-repl-feature-enabled\*\/)?(\})/g;
+  const NODE_REPL_FEATURE_CONFIG_PATCHED_RE =
+    /[A-Za-z_$][\w$]*=\{"features\.js_repl":!0\/\*codex-offline:node-repl-feature-enabled\*\/\}/;
+  const NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:node-repl-config-reconcile-finally*/');
+  const NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:node-repl-disable-sandbox*/');
+  const NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:node-repl-tool-search-feature*/');
+  const COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-plugin-root-fallback*/');
+  const COMPUTER_USE_THREAD_CONFIG_DIAGNOSTICS_PATCH_MARKER =
+    '/*codex-offline:computer-use-thread-config-diagnostics*/';
+  const COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER =
+    '/*codex-offline:computer-use-forward-thread-start-diagnostics*/';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER =
+    '/*codex-offline:computer-use-forward-input-diagnostics*/';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER =
+    '/*codex-offline:computer-use-forward-input-diagnostics-v2*/';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER =
+    '/*codex-offline:computer-use-forward-input-diagnostics-v3*/';
+  const COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_PATCH_MARKER =
+    '/*codex-offline:computer-use-thread-start-tool-context-diagnostics*/';
+  const COMPUTER_USE_MCP_STATUS_DIAGNOSTICS_PATCH_MARKER =
+    '/*codex-offline:computer-use-mcp-status-diagnostics*/';
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-thread-start-tool-search*/');
+  const COMPUTER_USE_INPUT_MENTION_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-input-mention*/');
+  const COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-input-mention-v2*/');
+  const COMPUTER_USE_INPUT_SKILL_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-input-skill*/');
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool*/');
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
+  const COMPUTER_USE_INPUT_MENTION_HELPER =
+    'function _codexOfflineComputerUseMentionItems(e){let t=typeof e==`string`?e.trimStart():``;' +
+    'let n=t.match(/\\[(@?(?:[^\\]]+))\\]\\((plugin:\\/\\/computer-use(?:@[^)]+)?)\\)/),' +
+    'r=n?.[2]??`plugin://computer-use@openai-bundled`,i=typeof n?.[1]==`string`?' +
+    'n[1].replace(/^@/,``).trim():``;' +
+    'i.length===0&&(i=/^(?:@?\\u7535\\u8111)(?=\\s|$)/.test(t)?`\\u7535\\u8111`:`Computer`);' +
+    'r.includes(`@`)||(r=`plugin://computer-use@openai-bundled`);' +
+    'return(t.includes(`plugin://computer-use`)||/^(?:@?(?:\\u7535\\u8111|Computer(?: Use)?))(?=\\s|$)/i.test(t))?' +
+    '[{type:`mention`,name:i,path:r}]:[]}' +
+    COMPUTER_USE_INPUT_MENTION_PATCH_MARKER +
+    COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER;
+  const COMPUTER_USE_INPUT_MENTION_HELPER_RE =
+    /function _codexOfflineComputerUseMentionItems\(e\)\{[\s\S]*?\}\/\*codex-offline:computer-use-input-mention\*\/(?:\/\*codex-offline:computer-use-input-mention-v2\*\/)?/;
+  const COMPUTER_USE_INPUT_MENTION_HELPER_NEEDLE =
+    'async function $g({context:e,prompt:t,workspaceRoots:n,cwd:r,hostId:i,agentMode:a,serviceTier:o,collaborationMode:s,memoryPreferences:c,workspaceKind:l=`project`,projectlessOutputDirectory:u,projectAssignment:d})';
+  const COMPUTER_USE_INPUT_MENTION_PATCHES = [
+    {
+      needle:
+        'input:[{type:`text`,text:t,text_elements:[]},...Qg(e,i!==He,{shouldRestrictRemoteHostImageSize:!1})]',
+      replacement:
+        'input:[{type:`text`,text:t,text_elements:[]},..._codexOfflineComputerUseMentionItems(t),...Qg(e,i!==He,{shouldRestrictRemoteHostImageSize:!1})]',
+    },
+    {
+      needle:
+        'p=[{type:`text`,text:v(i),text_elements:[]},...Qg(i,d,{shouldRestrictRemoteHostImageSize:!1})]',
+      replacement:
+        'p=[{type:`text`,text:v(i),text_elements:[]},..._codexOfflineComputerUseMentionItems(v(i)),...Qg(i,d,{shouldRestrictRemoteHostImageSize:!1})]',
+    },
+    {
+      needle:
+        'f=[{type:`text`,text:v(u),text_elements:[]},...Qg(u,c,{shouldRestrictRemoteHostImageSize:!1})]',
+      replacement:
+        'f=[{type:`text`,text:v(u),text_elements:[]},..._codexOfflineComputerUseMentionItems(v(u)),...Qg(u,c,{shouldRestrictRemoteHostImageSize:!1})]',
+    },
+  ];
+  const COMPUTER_USE_INPUT_MENTION_CURRENT_RE =
+    /(\[\{type:`text`,text:([^,\]]+?),text_elements:\[\]\},)\.\.\.([A-Za-z_$][\w$]*)\(([^)]*?\{shouldRestrictRemoteHostImageSize:!1\})\)\]/g;
+  const COMPUTER_USE_INPUT_MENTION_CURRENT_TEST_RE =
+    /(\[\{type:`text`,text:([^,\]]+?),text_elements:\[\]\},)\.\.\.([A-Za-z_$][\w$]*)\(([^)]*?\{shouldRestrictRemoteHostImageSize:!1\})\)\]/;
+  const FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:feature-overrides-preserve-mcp-config*/');
+  const FEATURE_OVERRIDES_CONFIG_NAMESPACE_RE =
+    /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{let\s+([A-Za-z_$][\w$]*)=\{\};for\(let\[([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\]of Object\.entries\(\2\)\)\{let\s+([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\4\);([A-Za-z_$][\w$]*)\.has\(\6\)\|\|\(\3\[([A-Za-z_$][\w$]*)\(\6\)\]=\5\)\}return \3\}/;
+  const FEATURE_OVERRIDES_UNIFIED_EXEC_ONLY_RE =
+    /return ([A-Za-z_$][\w$]*)\[`features\.unified_exec`\]=!0,\1\}\/\*codex-offline:feature-overrides-preserve-mcp-config\*\//;
+  const FEATURE_OVERRIDES_TOOL_SEARCH_PATCHED_RE =
+    /[`"]features\.tool_search[`"]\]=!0[\s\S]{0,160}[`"]features\.js_repl_tools_only[`"]\]=!0[\s\S]{0,160}[`"]features\.tool_suggest[`"]\]=!0[\s\S]{0,220}[`"]features\.tool_search_always_defer_mcp_tools[`"]\]=!0[\s\S]{0,220}[`"]features\.non_prefixed_mcp_tool_names[`"]\]=!0[\s\S]{0,220}[`"]features\.unavailable_dummy_tools[`"]\]=!0[\s\S]{0,120}\/\*codex-offline:feature-overrides-preserve-mcp-config\*\//;
+  const FEATURE_OVERRIDES_TOOL_SEARCH_ONLY_RE =
+    /return ([A-Za-z_$][\w$]*)\[`features\.unified_exec`\]=!0,\1\[`features\.tool_search`\]=!0,\1\}\/\*codex-offline:feature-overrides-preserve-mcp-config\*\//;
+  const FEATURE_OVERRIDES_TOOL_SEARCH_JS_REPL_ONLY_RE =
+    /return ([A-Za-z_$][\w$]*)\[`features\.unified_exec`\]=!0,\1\[`features\.tool_search`\]=!0,\1\[`features\.js_repl_tools_only`\]=!0,\1\}\/\*codex-offline:feature-overrides-preserve-mcp-config\*\//;
+  const FEATURE_OVERRIDES_TOOL_SUGGEST_ONLY_RE =
+    /return ([A-Za-z_$][\w$]*)\[`features\.unified_exec`\]=!0,\1\[`features\.tool_search`\]=!0,\1\[`features\.js_repl_tools_only`\]=!0,\1\[`features\.tool_suggest`\]=!0,\1\}\/\*codex-offline:feature-overrides-preserve-mcp-config\*\//;
+  const BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:bundled-plugin-cache-lock-nonfatal*/');
+  const BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE =
+    '`plugin_cache_windows_file_lock`';
+  const BUNDLED_PLUGIN_CACHE_LOCK_THROW_NEEDLE =
+    'if(i!=null){if(Fo.warning(`bundled_plugins_marketplace_install_failed`,{safe:{errorCategory:Ho({error:i.error,platformFamily:e.platformFamily}),marketplaceName:t,platformFamily:e.platformFamily,...i.safe},sensitive:{error:i.error,marketplaceRoot:e.materializedMarketplace.marketplaceRoot,...i.sensitive}}),n)throw i.error;return!1}return!0}';
+  const BUNDLED_PLUGIN_CACHE_LOCK_THROW_REPLACEMENT =
+    'if(i!=null){let r=Ho({error:i.error,platformFamily:e.platformFamily});' +
+    'if(Fo.warning(`bundled_plugins_marketplace_install_failed`,{safe:{errorCategory:r,marketplaceName:t,platformFamily:e.platformFamily,...i.safe},sensitive:{error:i.error,marketplaceRoot:e.materializedMarketplace.marketplaceRoot,...i.sensitive}}),' +
+    `n&&r!==${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE})throw i.error;` +
+    `return r===${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE}` +
+    BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER +
+    '}return!0}';
+  const BUNDLED_PLUGIN_CACHE_LOCK_THROW_RE =
+    /if\(([A-Za-z_$][\w$]*)!=null\)\{if\(([A-Za-z_$][\w$]*)\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:([A-Za-z_$][\w$]*)\(\{error:\1\.error,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily,\.\.\.\1\.safe\},sensitive:\{error:\1\.error,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot,\.\.\.\1\.sensitive\}\}\),n\)throw \1\.error;return!1\}return!0\}/g;
+  const BUNDLED_PLUGIN_CACHE_LOCK_CATCH_THROW_RE =
+    /catch\(([A-Za-z_$][\w$]*)\)\{if\(([A-Za-z_$][\w$]*)\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:([A-Za-z_$][\w$]*)\(\{error:\1,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily\},sensitive:\{error:\1,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot\}\}\),n\)throw \1;return!1\}/g;
+  const NODE_REPL_CONFIG_RECONCILE_FINAL_STEP =
+    'await Ro({appServerConnection:r,chromeExtensionSyncManagedPluginStore:l,' +
+    'devRuntimeRepoRoot:s,marketplacePluginNames:e.marketplacePluginNames,' +
+    'forceInstallPluginNames:d,installWhenMissingPluginNames:f,' +
+    'syncInstallStateWithChromeExtensionPluginNames:m,marketplaceName:a,' +
+    'resourcesPath:i,runtimeMarketplaceRoot:o}),await Promise.all(' +
+    'e.marketplacePluginDescriptors.map(async e=>{e.migrate!=null&&' +
+    'await e.migrate({appServerConnection:r,codexHome:t.codexHome,' +
+    'marketplaceName:a,trashItem:t.trashItem})})),await ci({' +
+    'appServerConnection:r,desktopFeatureAvailability:e.desktopFeatureAvailability,' +
+    'isPackaged:t.isPackaged,platform:u,repoRoot:t.repoRoot,resourcesPath:i}),' +
+    'p=await b(e.marketplacePluginDescriptors),t.onReconcileComplete?.()';
+  const NODE_REPL_CONFIG_RECONCILE_FINAL_STEP_REPLACEMENT =
+    'try{await Ro({appServerConnection:r,chromeExtensionSyncManagedPluginStore:l,' +
+    'devRuntimeRepoRoot:s,marketplacePluginNames:e.marketplacePluginNames,' +
+    'forceInstallPluginNames:d,installWhenMissingPluginNames:f,' +
+    'syncInstallStateWithChromeExtensionPluginNames:m,marketplaceName:a,' +
+    'resourcesPath:i,runtimeMarketplaceRoot:o}),await Promise.all(' +
+    'e.marketplacePluginDescriptors.map(async e=>{e.migrate!=null&&' +
+    'await e.migrate({appServerConnection:r,codexHome:t.codexHome,' +
+    'marketplaceName:a,trashItem:t.trashItem})}))}finally{await ci({' +
+    'appServerConnection:r,desktopFeatureAvailability:e.desktopFeatureAvailability,' +
+    'isPackaged:t.isPackaged,platform:u,repoRoot:t.repoRoot,resourcesPath:i})}' +
+    NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER +
+    ';p=await b(e.marketplacePluginDescriptors),t.onReconcileComplete?.()';
+  const NODE_REPL_CONFIG_RECONCILE_FINAL_STEP_CURRENT_RE =
+    /await ([A-Za-z_$][\w$]*)\(\{appServerConnection:([A-Za-z_$][\w$]*),browserSkillVariant:([A-Za-z_$][\w$]*),chromeExtensionSyncManagedPluginStore:([A-Za-z_$][\w$]*),devRuntimeRepoRoot:([A-Za-z_$][\w$]*),marketplacePluginNames:([A-Za-z_$][\w$]*)\.marketplacePluginNames,forceInstallPluginNames:([A-Za-z_$][\w$]*),installWhenMissingPluginNames:([A-Za-z_$][\w$]*),syncInstallStateWithChromeExtensionPluginNames:([A-Za-z_$][\w$]*),marketplaceName:([A-Za-z_$][\w$]*),resourcesPath:([A-Za-z_$][\w$]*),runtimeMarketplaceRoot:([A-Za-z_$][\w$]*)\}\),await Promise\.all\(\6\.marketplacePluginDescriptors\.map\(async ([A-Za-z_$][\w$]*)=>\{\13\.migrate!=null&&await \13\.migrate\(\{appServerConnection:\2,codexHome:e\.codexHome,marketplaceName:\10,trashItem:e\.trashItem\}\)\}\)\),await ([A-Za-z_$][\w$]*)\(\{appServerConnection:\2,desktopFeatureAvailability:\6\.desktopFeatureAvailability,isPackaged:e\.isPackaged,platform:([A-Za-z_$][\w$]*),repoRoot:e\.repoRoot,resourcesPath:\11\}\),/;
+  const NODE_REPL_DISABLE_SANDBOX_NEEDLE =
+    'let x=Rn({computerUse:h,computerUsePaths:v,hostConfig:r,' +
+    'runtimePaths:_,shouldUseWslPaths:d,availableBrowserUseBackends:g,' +
+    'computerUseNativePipeEnabled:b,trustedBrowserClientSha256s:m||b?p:[]});' +
+    'return x==null?null:(Fn(_),Vn([Tn,x]))';
+  const NODE_REPL_DISABLE_SANDBOX_REPLACEMENT =
+    'let x=Rn({computerUse:h,computerUsePaths:v,hostConfig:r,' +
+    'runtimePaths:_,shouldUseWslPaths:d,availableBrowserUseBackends:g,' +
+    'computerUseNativePipeEnabled:b,trustedBrowserClientSha256s:m||b?p:[]});' +
+    'if(x!=null&&h&&f===`win32`){let S=`mcp_servers.${e.jn}`,C=x[S];' +
+    'C&&typeof C==`object`&&!Array.isArray(C)&&' +
+    '(x={...x,[S]:{...C,args:Array.from(new Set([' +
+    '...(Array.isArray(C.args)?C.args:[]),`--disable-sandbox`]))}});' +
+    'x={...x,[`features.tool_search`]:!0}' +
+    NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER +
+    '}' +
+    NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER +
+    'Cn.info(`computer_use_thread_config_resolved`,{safe:{computerUse:h,' +
+    'computerUseNativePipeEnabled:b,hasNodeReplConfig:x?.[`mcp_servers.${e.jn}`]!=null,' +
+    'hasWindowsHelperPath:v.windowsHelperPath!=null,' +
+    'hasWindowsHelperTransportModulePath:v.windowsHelperTransportModulePath!=null,' +
+    'nodeModuleDirCount:Array.isArray(v.nodeModuleDirs)?v.nodeModuleDirs.length:0,' +
+    'platform:_.platform},sensitive:{nodeModuleDirs:v.nodeModuleDirs,' +
+    'windowsHelperPath:v.windowsHelperPath,' +
+    'windowsHelperTransportModulePath:v.windowsHelperTransportModulePath}});' +
+    COMPUTER_USE_THREAD_CONFIG_DIAGNOSTICS_PATCH_MARKER +
+    'return x==null?null:(Fn(_),Vn([Tn,x]))';
+  const NODE_REPL_CONFIG_HELPER_RE =
+    /\{\[`mcp_servers\.\$\{([A-Za-z_$][\w$]*)\}`\]:\{args:\[\],command:([A-Za-z_$][\w$]*),env:([A-Za-z_$][\w$]*),startup_timeout_sec:120\}\}/;
+  const NODE_REPL_CONFIG_HELPER_REPLACEMENT =
+    '{[`mcp_servers.${$1}`]:{args:[`--disable-sandbox`],command:$2,env:$3,startup_timeout_sec:120},' +
+    '[`features.tool_search`]:!0,' +
+    '[`features.js_repl_tools_only`]:!0,' +
+    '[`features.tool_suggest`]:!0,' +
+    '[`features.tool_search_always_defer_mcp_tools`]:!0,' +
+    '[`features.non_prefixed_mcp_tool_names`]:!0,' +
+    '[`features.unavailable_dummy_tools`]:!0' +
+    NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER +
+    '}' +
+    NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER;
+  const NODE_REPL_DISABLE_SANDBOX_LEGACY_DIAGNOSTICS_NEEDLE =
+    NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER +
+    'return x==null?null:(Fn(_),Vn([Tn,x]))';
+  const NODE_REPL_DISABLE_SANDBOX_LEGACY_DIAGNOSTICS_REPLACEMENT =
+    NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER +
+    'Cn.info(`computer_use_thread_config_resolved`,{safe:{computerUse:h,' +
+    'computerUseNativePipeEnabled:b,hasNodeReplConfig:x?.[`mcp_servers.${e.jn}`]!=null,' +
+    'hasWindowsHelperPath:v.windowsHelperPath!=null,' +
+    'hasWindowsHelperTransportModulePath:v.windowsHelperTransportModulePath!=null,' +
+    'nodeModuleDirCount:Array.isArray(v.nodeModuleDirs)?v.nodeModuleDirs.length:0,' +
+    'platform:_.platform},sensitive:{nodeModuleDirs:v.nodeModuleDirs,' +
+    'windowsHelperPath:v.windowsHelperPath,' +
+    'windowsHelperTransportModulePath:v.windowsHelperTransportModulePath}});' +
+    COMPUTER_USE_THREAD_CONFIG_DIAGNOSTICS_PATCH_MARKER +
+    'return x==null?null:(Fn(_),Vn([Tn,x]))';
+  const NODE_REPL_TOOL_SEARCH_FEATURE_UPGRADE_RE =
+    /(if\(x!=null&&h&&f===`win32`\)\{let S=`mcp_servers\.\$\{e\.jn\}`,C=x\[S\];C&&typeof C==`object`&&!Array\.isArray\(C\)&&\(x=\{\.\.\.x,\[S\]:\{\.\.\.C,args:Array\.from\(new Set\(\[\.\.\.\(Array\.isArray\(C\.args\)\?C\.args:\[\]\),`--disable-sandbox`\]\)\)\}\}\))(\})(\/\*codex-offline:node-repl-disable-sandbox\*\/)/;
+  const NODE_REPL_TOOL_SEARCH_FEATURE_UPGRADE_REPLACEMENT =
+    '$1;x={...x,[`features.tool_search`]:!0}' +
+    NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER +
+    '$2$3';
+  const NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_RE =
+    /(\))x=\{\.\.\.x,\[`features\.tool_search`\]:!0\}(\/\*codex-offline:node-repl-tool-search-feature\*\/)/;
+  const NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_REPLACEMENT =
+    '$1;x={...x,[`features.tool_search`]:!0}$2';
+  const COMPUTER_USE_PLUGIN_ROOT_FALLBACK_NEEDLE =
+    'function Tt({codexHome:t,env:r=process.env,marketplaceName:i=e.ir(n.j.resolve()),' +
+    'marketplaces:a,pathExists:o=c.existsSync}){for(let n of ft({marketplaceName:i,marketplaces:a}))' +
+    '{let i=n.plugins.find(e=>e.name===`computer-use`&&e.installed&&e.enabled&&e.source.type===`local`);' +
+    'if(i?.source.type===`local`)return wt({env:r,installedPluginRoot:e.cr({codexHome:t,' +
+    'localVersion:i.localVersion,marketplaceName:n.name,pluginName:i.name}),pathExists:o})}' +
+    'return wt({env:r,pathExists:o})}';
+  const COMPUTER_USE_PLUGIN_ROOT_FALLBACK_REPLACEMENT =
+    'function Tt({codexHome:t,env:r=process.env,marketplaceName:i=e.ir(n.j.resolve()),' +
+    'marketplaces:a,pathExists:l=c.existsSync}){for(let n of ft({marketplaceName:i,marketplaces:a}))' +
+    '{let i=n.plugins.find(e=>e.name===`computer-use`&&e.installed&&e.enabled&&e.source.type===`local`);' +
+    'if(i?.source.type===`local`)return wt({env:r,installedPluginRoot:e.cr({codexHome:t,' +
+    'localVersion:i.localVersion,marketplaceName:n.name,pluginName:i.name}),pathExists:l});' +
+    'let u=n.plugins.find(e=>e.name===`computer-use`&&' +
+    '(e.source?.type===`local`||e.source?.source===`local`)),d=u?.source?.path??null,' +
+    'f=n.path!=null&&d!=null?o.default.resolve(n.path,d):null;' +
+    'if(f!=null&&l(f)){Cn.info(`computer_use_plugin_root_fallback_used`,' +
+    '{safe:{marketplaceName:n.name},sensitive:{installedPluginRoot:f}});' +
+    'return wt({env:r,installedPluginRoot:f,pathExists:l})}}' +
+    COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER +
+    'return wt({env:r,pathExists:l})}';
+  const COMPUTER_USE_PLUGIN_ROOT_FALLBACK_CURRENT_RE =
+    /function ([A-Za-z_$][\w$]*)\(\{codexHome:([A-Za-z_$][\w$]*),env:([A-Za-z_$][\w$]*)=process\.env,marketplaceName:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.or\(([A-Za-z_$][\w$]*)\.M\.resolve\(\)\),marketplaces:([A-Za-z_$][\w$]*),pathExists:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.existsSync\}\)\{for\(let ([A-Za-z_$][\w$]*) of ([A-Za-z_$][\w$]*)\(\{marketplaceName:\4,marketplaces:\7\}\)\)\{let ([A-Za-z_$][\w$]*)=\10\.plugins\.find\(([A-Za-z_$][\w$]*)=>\13\.name===`computer-use`&&\13\.installed&&\13\.enabled&&\13\.source\.type===`local`\);if\(\12\?\.source\.type===`local`\)return ([A-Za-z_$][\w$]*)\(\{env:\3,installedPluginRoot:\5\.([A-Za-z_$][\w$]*)\(\{codexHome:\2,localVersion:\12\.localVersion,marketplaceName:\10\.name,pluginName:\12\.name\}\),pathExists:\8\}\)\}return \14\(\{env:\3,pathExists:\8\}\)\}/;
+  const COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_NEEDLE =
+    'try{this.logger.debug(`bridge_forwarded_to_transport`,{safe:{requestId:r,' +
+    'method:t.method,conversationId:i??null,originWebcontentsId:e.id,' +
+    'transportKind:this.options.transport.kind,pendingCount:this.pendingRequests.size},' +
+    'sensitive:{}}),this.sendMessage(t),t.method===`turn/start`&&i!=null&&' +
+    'this.prewarmedThreads.publishThreadStarted(i)}catch(n){';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_SAFE_FIELDS =
+    'inputItemCount:_codexOfflineItems.length,' +
+    'inputItemTypes:_codexOfflineItems.map(e=>e?.type).join(`,`),' +
+    'mentionCount:_codexOfflineItems.filter(e=>e?.type===`mention`).length,' +
+    'skillCount:_codexOfflineItems.filter(e=>e?.type===`skill`).length,' +
+    'hasComputerUseMention:_codexOfflineItems.some(e=>typeof e?.path===`string`&&' +
+    'e.path.includes(`plugin://computer-use`)),' +
+    'hasComputerUseText:_codexOfflineItems.some(e=>typeof e?.text===`string`&&' +
+    'e.text.includes(`plugin://computer-use`)),' +
+    'textPrefix:String(_codexOfflineItems.find(e=>e?.type===`text`)?.text??``).slice(0,160)';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_SAFE_FIELDS =
+    'inputItemCount:_codexOfflineItems.length,' +
+    'inputItemTypes:_codexOfflineItems.map(e=>e?.type).join(`,`),' +
+    'mentionCount:_codexOfflineItems.filter(e=>e?.type===`mention`).length,' +
+    'skillCount:_codexOfflineItems.filter(e=>e?.type===`skill`).length,' +
+    'hasComputerUseMention:_codexOfflineItems.some(e=>typeof e?.path===`string`&&' +
+    'e.path.includes(`plugin://computer-use`)),' +
+    'hasComputerUseText:_codexOfflineItems.some(e=>typeof e?.text===`string`&&' +
+    'e.text.includes(`plugin://computer-use`)),' +
+    'mentionNames:_codexOfflineItems.filter(e=>e?.type===`mention`).map(e=>String(e?.name??``)).join(`|`),' +
+    'mentionPaths:_codexOfflineItems.filter(e=>e?.type===`mention`).map(e=>String(e?.path??``)).join(`|`),' +
+    'textElementCounts:_codexOfflineItems.filter(e=>e?.type===`text`).map(e=>Array.isArray(e?.text_elements)?e.text_elements.length:Array.isArray(e?.textElements)?e.textElements.length:-1).join(`,`),' +
+    'textPrefix:String(_codexOfflineItems.find(e=>e?.type===`text`)?.text??``).slice(0,160)';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_SAFE_FIELDS =
+    'inputItemCount:_codexOfflineItems.length,' +
+    'inputItemTypes:_codexOfflineItems.map(e=>e?.type).join(`,`),' +
+    'mentionCount:_codexOfflineItems.filter(e=>e?.type===`mention`).length,' +
+    'skillCount:_codexOfflineItems.filter(e=>e?.type===`skill`).length,' +
+    'hasComputerUseMention:_codexOfflineItems.some(e=>typeof e?.path===`string`&&' +
+    'e.path.includes(`plugin://computer-use`)),' +
+    'hasComputerUseText:_codexOfflineItems.some(e=>typeof e?.text===`string`&&' +
+    'e.text.includes(`plugin://computer-use`)),' +
+    'mentionNames:_codexOfflineItems.filter(e=>e?.type===`mention`).map(e=>String(e?.name??``)).join(`|`),' +
+    'mentionPaths:_codexOfflineItems.filter(e=>e?.type===`mention`).map(e=>String(e?.path??``)).join(`|`),' +
+    'skillNames:_codexOfflineItems.filter(e=>e?.type===`skill`).map(e=>String(e?.name??``)).join(`|`),' +
+    'skillPaths:_codexOfflineItems.filter(e=>e?.type===`skill`).map(e=>String(e?.path??``)).join(`|`),' +
+    'textElementCounts:_codexOfflineItems.filter(e=>e?.type===`text`).map(e=>Array.isArray(e?.text_elements)?e.text_elements.length:Array.isArray(e?.textElements)?e.textElements.length:-1).join(`,`),' +
+    'textPrefix:String(_codexOfflineItems.find(e=>e?.type===`text`)?.text??``).slice(0,160)';
+  const COMPUTER_USE_INPUT_SKILL_INJECTION_CODE =
+    'let _codexOfflineComputerUseSkillPath=this._codexOfflineComputerUseSkillPath??null;' +
+    'if(t.method===`thread/start`){let _codexOfflineNodeDirs=t.params?.config?.[`mcp_servers.node_repl`]?.env?.NODE_REPL_NODE_MODULE_DIRS;' +
+    'if(typeof _codexOfflineNodeDirs===`string`){let _codexOfflineNodeDir=_codexOfflineNodeDirs.split(`;`).map(e=>e.trim()).find(e=>/[\\\\/]computer-use[\\\\/][^\\\\/]+[\\\\/]node_modules[\\\\/]?$/i.test(e));' +
+    'if(_codexOfflineNodeDir!=null){let _codexOfflineRoot=_codexOfflineNodeDir.replace(/[\\\\/]node_modules[\\\\/]?$/i,``),_codexOfflineSep=_codexOfflineRoot.includes(`\\\\`)?`\\\\`:`/`;' +
+    '_codexOfflineComputerUseSkillPath=`${_codexOfflineRoot}${_codexOfflineSep}skills${_codexOfflineSep}computer-use${_codexOfflineSep}SKILL.md`,this._codexOfflineComputerUseSkillPath=_codexOfflineComputerUseSkillPath}}}' +
+    'if(t.method===`turn/start`&&_codexOfflineComputerUseSkillPath!=null){let _codexOfflineInput=t.params?.input??t.params?.params?.input??null;' +
+    'if(Array.isArray(_codexOfflineInput)&&_codexOfflineInput.some(e=>e?.type===`mention`&&typeof e?.path===`string`&&e.path.includes(`plugin://computer-use`))&&!_codexOfflineInput.some(e=>e?.type===`skill`&&(e?.name===`computer-use`||typeof e?.path===`string`&&e.path.includes(`computer-use`))))' +
+    '_codexOfflineInput.push({type:`skill`,name:`computer-use`,path:_codexOfflineComputerUseSkillPath})}' +
+    COMPUTER_USE_INPUT_SKILL_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE =
+    'if(t.method===`thread/start`&&t.params?.config?.[`mcp_servers.node_repl`]!=null)' +
+    '{let _codexOfflineNodeReplConfig=t.params.config[`mcp_servers.node_repl`];' +
+    'if(_codexOfflineNodeReplConfig&&typeof _codexOfflineNodeReplConfig===`object`&&!Array.isArray(_codexOfflineNodeReplConfig))' +
+    't.params.config={...t.params.config,[`mcp_servers.node_repl`]:{..._codexOfflineNodeReplConfig,args:Array.from(new Set([...(Array.isArray(_codexOfflineNodeReplConfig.args)?_codexOfflineNodeReplConfig.args:[]),`--disable-sandbox`]))},' +
+    '[`features.tool_search`]:!0,' +
+    '[`features.js_repl_tools_only`]:!0,[`features.tool_suggest`]:!0,' +
+    '[`features.tool_search_always_defer_mcp_tools`]:!0,' +
+    '[`features.non_prefixed_mcp_tool_names`]:!0,' +
+    '[`features.unavailable_dummy_tools`]:!0}}' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_TOOL_SUGGEST_ONLY_CODE =
+    'if(t.method===`thread/start`&&t.params?.config?.[`mcp_servers.node_repl`]!=null)' +
+    '{t.params.config={...t.params.config,[`features.tool_search`]:!0,' +
+    '[`features.js_repl_tools_only`]:!0,[`features.tool_suggest`]:!0}}' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_LEGACY_CODE =
+    'if(t.method===`thread/start`&&t.params?.config?.[`mcp_servers.node_repl`]!=null)' +
+    '{t.params.config={...t.params.config,[`features.tool_search`]:!0}}' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_JS_REPL_ONLY_CODE =
+    'if(t.method===`thread/start`&&t.params?.config?.[`mcp_servers.node_repl`]!=null)' +
+    '{t.params.config={...t.params.config,[`features.tool_search`]:!0,' +
+    '[`features.js_repl_tools_only`]:!0}}' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_SEARCH_FULL_FLAGS_ONLY_CODE =
+    'if(t.method===`thread/start`&&t.params?.config?.[`mcp_servers.node_repl`]!=null)' +
+    '{t.params.config={...t.params.config,[`features.tool_search`]:!0,' +
+    '[`features.js_repl_tools_only`]:!0,[`features.tool_suggest`]:!0,' +
+    '[`features.tool_search_always_defer_mcp_tools`]:!0,' +
+    '[`features.non_prefixed_mcp_tool_names`]:!0,' +
+    '[`features.unavailable_dummy_tools`]:!0}}' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER;
+  const COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_CODE =
+    'if(t.method===`thread/start`){let _codexOfflineConfig=t.params?.config??{},' +
+    '_codexOfflineDynamicTools=Array.isArray(t.params?.dynamicTools)?t.params.dynamicTools:[];' +
+    'this.logger.info(`computer_use_thread_start_tool_context`,{safe:{' +
+    'configKeys:_codexOfflineConfig&&typeof _codexOfflineConfig===`object`?' +
+    'Object.keys(_codexOfflineConfig).sort().join(`|`):``,' +
+    'hasToolSearchFeature:_codexOfflineConfig?.[`features.tool_search`]===!0,' +
+    'hasToolSearchDeferMcpToolsFeature:_codexOfflineConfig?.[`features.tool_search_always_defer_mcp_tools`]===!0,' +
+    'hasJsReplToolsOnlyFeature:_codexOfflineConfig?.[`features.js_repl_tools_only`]===!0,' +
+    'hasNonPrefixedMcpToolNamesFeature:_codexOfflineConfig?.[`features.non_prefixed_mcp_tool_names`]===!0,' +
+    'hasUnavailableDummyToolsFeature:_codexOfflineConfig?.[`features.unavailable_dummy_tools`]===!0,' +
+    'hasToolSuggestFeature:_codexOfflineConfig?.[`features.tool_suggest`]===!0,' +
+    'dynamicToolCount:_codexOfflineDynamicTools.length,' +
+    'dynamicToolNames:_codexOfflineDynamicTools.map(e=>String(e?.name??``)).join(`|`),' +
+    'dynamicToolNamespaces:_codexOfflineDynamicTools.map(e=>String(e?.namespace??``)).join(`|`),' +
+    'dynamicToolDeferLoading:_codexOfflineDynamicTools.map(e=>e?.deferLoading===!0?`1`:`0`).join(`|`),' +
+    'developerInstructionsLength:typeof t.params?.developerInstructions===`string`?t.params.developerInstructions.length:0,' +
+    'computerUseSkillPathKnown:this._codexOfflineComputerUseSkillPath!=null},' +
+    'sensitive:{dynamicTools:_codexOfflineDynamicTools,' +
+    'developerInstructionsPrefix:String(t.params?.developerInstructions??``).slice(0,800)}})}' +
+    COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_PATCH_MARKER;
+  const COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_REPLACEMENT =
+    'try{' +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE +
+    't.method===`thread/start`&&this.logger.info(' +
+    '`computer_use_forward_thread_start_config`,{safe:{' +
+    'hasConfig:t.params?.config!=null,' +
+    'hasJsReplFeature:t.params?.config?.[`features.js_repl`]===!0,' +
+    'hasNodeReplConfig:t.params?.config?.[`mcp_servers.node_repl`]!=null,' +
+    'configKeyCount:t.params?.config&&typeof t.params.config===`object`?' +
+    'Object.keys(t.params.config).length:0},sensitive:{' +
+    'nodeReplConfig:t.params?.config?.[`mcp_servers.node_repl`]??null}});' +
+    COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER +
+    COMPUTER_USE_INPUT_SKILL_INJECTION_CODE +
+    COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_CODE +
+    'if(t.method===`thread/start`||t.method===`turn/start`){let ' +
+    '_codexOfflineInput=t.params?.input??t.params?.params?.input??null,' +
+    '_codexOfflineItems=Array.isArray(_codexOfflineInput)?_codexOfflineInput:[];' +
+    'this.logger.info(`computer_use_forward_input`,{safe:{method:t.method,' +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_SAFE_FIELDS +
+    '},' +
+    'sensitive:{}})}' +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER +
+    'this.logger.debug(`bridge_forwarded_to_transport`,{safe:{requestId:r,' +
+    'method:t.method,conversationId:i??null,originWebcontentsId:e.id,' +
+    'transportKind:this.options.transport.kind,pendingCount:this.pendingRequests.size},' +
+    'sensitive:{}}),this.sendMessage(t),t.method===`turn/start`&&i!=null&&' +
+    'this.prewarmedThreads.publishThreadStarted(i)}catch(n){';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_NEEDLE =
+    COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER +
+    'this.logger.debug(`bridge_forwarded_to_transport`,{safe:{requestId:r,';
+  const COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_REPLACEMENT =
+    COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER +
+    COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE +
+    COMPUTER_USE_INPUT_SKILL_INJECTION_CODE +
+    COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_CODE +
+    'if(t.method===`thread/start`||t.method===`turn/start`){let ' +
+    '_codexOfflineInput=t.params?.input??t.params?.params?.input??null,' +
+    '_codexOfflineItems=Array.isArray(_codexOfflineInput)?_codexOfflineInput:[];' +
+    'this.logger.info(`computer_use_forward_input`,{safe:{method:t.method,' +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_SAFE_FIELDS +
+    '},' +
+    'sensitive:{}})}' +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER +
+    COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER +
+    'this.logger.debug(`bridge_forwarded_to_transport`,{safe:{requestId:r,';
+  const COMPUTER_USE_MCP_STATUS_RESPONSE_NEEDLE =
+    'this.logger.info(`response_routed`,{safe:{requestId:n,method:r?.method??null,' +
+    'conversationId:r?.conversationId??null,originWebcontentsId:r?.originWebContentsId??null,' +
+    'durationMs:u,hadPending:r!=null,hadInternalHandler:!1,targetDestroyed:d,' +
+    'broadcastFallback:r!=null&&d===!0,errorCode:t.error?.code??null},sensitive:{}}),';
+  const COMPUTER_USE_MCP_STATUS_RESPONSE_REPLACEMENT =
+    'if(r?.method===`mcpServerStatus/list`){let _codexOfflineMcpServers=' +
+    'Array.isArray(t.result?.data)?t.result.data:[],' +
+    '_codexOfflineNodeRepl=_codexOfflineMcpServers.find(e=>e?.name===`node_repl`),' +
+    '_codexOfflineNodeReplTools=_codexOfflineNodeRepl?.tools&&' +
+    'typeof _codexOfflineNodeRepl.tools===`object`&&!Array.isArray(_codexOfflineNodeRepl.tools)?' +
+    'Object.keys(_codexOfflineNodeRepl.tools):[];' +
+    'this.logger.info(`computer_use_mcp_status_response`,{safe:{' +
+    'serverCount:_codexOfflineMcpServers.length,' +
+    'serverNames:_codexOfflineMcpServers.map(e=>String(e?.name??``)).join(`|`),' +
+    'nodeReplSeen:_codexOfflineNodeRepl!=null,' +
+    'nodeReplToolNames:_codexOfflineNodeReplTools.join(`|`)},' +
+    'sensitive:{nodeRepl:_codexOfflineNodeRepl??null}})}' +
+    COMPUTER_USE_MCP_STATUS_DIAGNOSTICS_PATCH_MARKER +
+    COMPUTER_USE_MCP_STATUS_RESPONSE_NEEDLE;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_SPEC =
+    '({namespace:`node_repl`,name:`js`,description:`Execute JavaScript in the persistent Node REPL used by Computer Use.`,inputSchema:{type:`object`,additionalProperties:!1,properties:{code:{type:`string`,description:`JavaScript source to execute in the persistent Node-backed kernel.`},timeout_ms:{type:`integer`,minimum:1,description:`Optional execution timeout in milliseconds.`},title:{type:`string`,minLength:1,maxLength:80,description:`Short user-facing description.`}},required:[`code`]}})';
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_SPEC =
+    '({name:`js`,description:`Execute JavaScript in the persistent Node REPL used by Computer Use. This forwards to node_repl.js.`,inputSchema:{type:`object`,additionalProperties:!1,properties:{code:{type:`string`,description:`JavaScript source to execute in the persistent Node-backed kernel.`},timeout_ms:{type:`integer`,minimum:1,description:`Optional execution timeout in milliseconds.`},title:{type:`string`,minLength:1,maxLength:80,description:`Short user-facing description.`}},required:[`code`]}})';
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOLS_RETURN_RE =
+    /return(\[\.\.\.[A-Za-z_$][\w$]*\?\[[A-Za-z_$][\w$]*\(\)\]:\[\],[\s\S]{0,900}?\]\.map\([A-Za-z_$][\w$]*=>\(\{\.\.\.[A-Za-z_$][\w$]*,namespace:[A-Za-z_$][\w$]*,[\s\S]{0,220}?\}\)\))/;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_MISSING_RE =
+    /(\(\{namespace:`node_repl`,name:`js`,description:`Execute JavaScript in the persistent Node REPL used by Computer Use\.`,inputSchema:\{[\s\S]{0,700}?required:\[`code`\]\}\}\),)(?!\(\{name:`js`,description:`Execute JavaScript in the persistent Node REPL used by Computer Use\. This forwards to node_repl\.js\.`)/;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_RE =
+    /(let [A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.get\([A-Za-z_$][\w$]*\),\{id:([A-Za-z_$][\w$]*),params:([A-Za-z_$][\w$]*)\}=[A-Za-z_$][\w$]*,\{threadId:([A-Za-z_$][\w$]*),tool:([A-Za-z_$][\w$]*)\}=\3;if\(!\4\)\{[\s\S]{0,260}?return\})/;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_RE =
+    /(async function [A-Za-z_$][\w$]*\(\{scope:([A-Za-z_$][\w$]*),serverRequest:([A-Za-z_$][\w$]*),hostId:([A-Za-z_$][\w$]*),queryClient:([A-Za-z_$][\w$]*)\}\)\{let [A-Za-z_$][\w$]*=\2\.get\([A-Za-z_$][\w$]*\),\{id:([A-Za-z_$][\w$]*),params:([A-Za-z_$][\w$]*)\}=\3,\{threadId:([A-Za-z_$][\w$]*),tool:([A-Za-z_$][\w$]*)\}=\7;if\(!\8\)\{[\s\S]{0,260}?return\})/;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_V2_RE =
+    /(?<prefix>async function [A-Za-z_$][\w$]*\(\{scope:(?<scope>[A-Za-z_$][\w$]*),serverRequest:(?<serverRequest>[A-Za-z_$][\w$]*),hostId:(?<hostId>[A-Za-z_$][\w$]*),queryClient:(?<queryClient>[A-Za-z_$][\w$]*)\}\)\{(?:let [^;{}]+;)?let\{id:(?<requestId>[A-Za-z_$][\w$]*),params:(?<params>[A-Za-z_$][\w$]*)\}=\k<serverRequest>,\{threadId:(?<threadId>[A-Za-z_$][\w$]*),tool:(?<tool>[A-Za-z_$][\w$]*)\}=\k<params>;if\(!\k<threadId>\)\{(?<logger>[A-Za-z_$][\w$]*)\.error\(`Missing threadId for dynamic tool call request`,\{safe:\{\},sensitive:\{id:\k<requestId>,params:\k<params>\}\}\);return\}let (?<result>[A-Za-z_$][\w$]*),(?<namespaceOk>[A-Za-z_$][\w$]*)=\k<params>\.namespace===[^,;]+,(?<compatOk>[A-Za-z_$][\w$]*)=\k<params>\.namespace==null&&[^;]+;)(?<gate>if\(!\k<namespaceOk>&&!\k<compatOk>\)\k<result>=(?<failureFn>[A-Za-z_$][\w$]*)\(`Unsupported dynamic tool namespace: \$\{\k<params>\.namespace\}`\);else)/;
+  const COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE =
+    'let _codexOfflineNodeReplStringify=e=>{try{return JSON.stringify(e)}catch{return String(e)}};' +
+    'let _codexOfflineNodeReplContentText=e=>Array.isArray(e)?e.map(e=>(e?.type===`text`||e?.type===`inputText`)?String(e.text??``):e?.text!=null?String(e.text):_codexOfflineNodeReplStringify(e)).join(`\\n`):``;' +
+    'let _codexOfflineNodeReplText=(()=>{let e=_codexOfflineNodeReplResult;' +
+    'for(let t of [e?.content,e?.contentItems,e?.toolResult?.content,e?.toolResult?.contentItems,e?.raw?.content,e?.raw?.contentItems]){let n=_codexOfflineNodeReplContentText(t);if(n.length>0)return n}' +
+    'if(e?.structuredContent!=null)return _codexOfflineNodeReplStringify(e.structuredContent);' +
+    'if(e?.toolResult?.structuredContent!=null)return _codexOfflineNodeReplStringify(e.toolResult.structuredContent);' +
+    'if(e?.raw?.structuredContent!=null)return _codexOfflineNodeReplStringify(e.raw.structuredContent);' +
+    'let t=_codexOfflineNodeReplContentText(e?.content??e?.contentItems);return t.length>0?t:_codexOfflineNodeReplStringify(e)??``})();';
+  function findAppServerRequestBusName(content) {
+    const patterns = [
+      /listExperimentalFeatures:[A-Za-z_$][\w$]*=>\s*([A-Za-z_$][\w$]*)\(`list-experimental-features`,\{[\s\S]{0,260}?hostId:/,
+      /listModels:[A-Za-z_$][\w$]*=>\s*([A-Za-z_$][\w$]*)\(`list-models-for-host`,\{[\s\S]{0,260}?hostId:/,
+      /await\s+([A-Za-z_$][\w$]*)\(`handle-dynamic-tools-for-thread-start-response-for-host`,\{hostId:/,
+      /await\s+([A-Za-z_$][\w$]*)\(`apply-thread-title-update-for-host`,\{hostId:/,
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(content);
+      if (match?.[1]) return match[1];
+    }
+    return null;
+  }
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CODE =
+    'if(($3.namespace===`node_repl`&&$5===`js`)||($3.namespace==null&&$5===`js`)){let _codexOfflineNodeReplResult,_codexOfflineNodeReplResponse;try{' +
+    '_codexOfflineNodeReplResult=await ln(`call-mcp-tool`,{hostId:n,threadId:$4,server:`node_repl`,tool:`js`,arguments:$3.arguments});' +
+    COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE +
+    'G.info(`computer_use_node_repl_js_call`,{safe:{namespace:$3.namespace??null,tool:$5,codePrefix:String($3.arguments?.code??``).slice(0,500),hasSetupComputerUseRuntime:String($3.arguments?.code??``).includes(`setupComputerUseRuntime`),hasDirectSkyImport:String($3.arguments?.code??``).includes(`@oai/sky`),hasListApps:String($3.arguments?.code??``).includes(`list_apps`),resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0},sensitive:{}});' +
+    '_codexOfflineNodeReplResponse={contentItems:[{type:`inputText`,text:_codexOfflineNodeReplText}],success:_codexOfflineNodeReplResult?.isError!==!0}' +
+    '}catch(_codexOfflineNodeReplError){_codexOfflineNodeReplResponse=Ge(String(_codexOfflineNodeReplError?.message??_codexOfflineNodeReplError))}' +
+    COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER +
+    'X.dispatchMessage(`mcp-response`,{hostId:n,response:{id:a($2),result:_codexOfflineNodeReplResponse}});return}';
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_CODE =
+    'if(($7.namespace===`node_repl`&&$9===`js`)||($7.namespace==null&&$9===`js`)){let _codexOfflineNodeReplResult,_codexOfflineNodeReplResponse;try{' +
+    '_codexOfflineNodeReplResult=await ln(`call-mcp-tool`,{hostId:$4,threadId:$8,server:`node_repl`,tool:`js`,arguments:$7.arguments});' +
+    COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE +
+    'G.info(`computer_use_node_repl_js_call`,{safe:{namespace:$7.namespace??null,tool:$9,codePrefix:String($7.arguments?.code??``).slice(0,500),hasSetupComputerUseRuntime:String($7.arguments?.code??``).includes(`setupComputerUseRuntime`),hasDirectSkyImport:String($7.arguments?.code??``).includes(`@oai/sky`),hasListApps:String($7.arguments?.code??``).includes(`list_apps`),resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0},sensitive:{}});' +
+    '_codexOfflineNodeReplResponse={contentItems:[{type:`inputText`,text:_codexOfflineNodeReplText}],success:_codexOfflineNodeReplResult?.isError!==!0}' +
+    '}catch(_codexOfflineNodeReplError){_codexOfflineNodeReplResponse=Ge(String(_codexOfflineNodeReplError?.message??_codexOfflineNodeReplError))}' +
+    COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER +
+    'X.dispatchMessage(`mcp-response`,{hostId:$4,response:{id:a($6),result:_codexOfflineNodeReplResponse}});return}';
+  function computerUseNodeReplDynamicToolCallCurrentV2Replacement(...args) {
+    const groups = args.at(-1);
+    const source = args.at(-2);
+    const appServerRequestFn = typeof source === 'string'
+      ? findAppServerRequestBusName(source)
+      : null;
+    if (!appServerRequestFn) {
+      throw new Error('Could not locate app-server request bus for Computer Use node_repl.js bridge.');
+    }
+    return (
+      groups.prefix +
+      `if((${groups.params}.namespace===\`node_repl\`&&${groups.tool}===\`js\`)||` +
+      `(${groups.params}.namespace==null&&${groups.tool}===\`js\`)){` +
+      'let _codexOfflineNodeReplResult;try{' +
+      `_codexOfflineNodeReplResult=await ${appServerRequestFn}(\`call-mcp-tool\`,{` +
+      `hostId:${groups.hostId},threadId:${groups.threadId},server:\`node_repl\`,` +
+      `tool:\`js\`,arguments:${groups.params}.arguments});` +
+      COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE +
+      `${groups.logger}.info(\`computer_use_node_repl_js_call\`,{safe:{` +
+      `namespace:${groups.params}.namespace??null,tool:${groups.tool},` +
+      `codePrefix:String(${groups.params}.arguments?.code??\`\`).slice(0,500),` +
+      `hasSetupComputerUseRuntime:String(${groups.params}.arguments?.code??\`\`).includes(\`setupComputerUseRuntime\`),` +
+      `hasDirectSkyImport:String(${groups.params}.arguments?.code??\`\`).includes(\`@oai/sky\`),` +
+      `hasListApps:String(${groups.params}.arguments?.code??\`\`).includes(\`list_apps\`),` +
+      'resultPrefix:_codexOfflineNodeReplText.slice(0,500),' +
+      'isError:_codexOfflineNodeReplResult?.isError===!0},sensitive:{}});' +
+      `${groups.result}={contentItems:[{type:\`inputText\`,text:_codexOfflineNodeReplText}],` +
+      'success:_codexOfflineNodeReplResult?.isError!==!0}' +
+      `}catch(_codexOfflineNodeReplError){${groups.result}=${groups.failureFn}(` +
+      'String(_codexOfflineNodeReplError?.message??_codexOfflineNodeReplError))}' +
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER +
+      `}else ${groups.gate}`
+    );
+  }
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE =
+    /if\(([A-Za-z_$][\w$]*)\.namespace===`node_repl`&&([A-Za-z_$][\w$]*)===`js`\)\{let _codexOfflineNodeReplResult;try\{_codexOfflineNodeReplResult=await Pi\(`mcpServer\/tool\/call`,\{params:\{threadId:([A-Za-z_$][\w$]*),server:`node_repl`,tool:`js`,arguments:\1\.arguments\}\}\);let _codexOfflineNodeReplText=Array\.isArray\(_codexOfflineNodeReplResult\?\.content\)\?_codexOfflineNodeReplResult\.content\.map\(e=>e\?\.type===`text`\?String\(e\.text\?\?``\):JSON\.stringify\(e\)\)\.join\(`\\n`\):JSON\.stringify\(_codexOfflineNodeReplResult\);u=\{contentItems:\[\{type:`inputText`,text:_codexOfflineNodeReplText\}\],success:_codexOfflineNodeReplResult\?\.isError!==!0\}\}catch\(_codexOfflineNodeReplError\)\{u=Ge\(String\(_codexOfflineNodeReplError\?\.message\?\?_codexOfflineNodeReplError\)\)\}\/\*codex-offline:computer-use-node-repl-dynamic-tool-call\*\/X\.dispatchMessage\(`mcp-response`,\{hostId:([A-Za-z_$][\w$]*),response:\{id:a\(([A-Za-z_$][\w$]*)\),result:u\}\}\);return\}/;
+  const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_REPLACEMENT =
+    'if(($1.namespace===`node_repl`&&$2===`js`)||($1.namespace==null&&$2===`js`)){let _codexOfflineNodeReplResult,_codexOfflineNodeReplResponse;try{' +
+    '_codexOfflineNodeReplResult=await ln(`call-mcp-tool`,{hostId:$4,threadId:$3,server:`node_repl`,tool:`js`,arguments:$1.arguments});' +
+    COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE +
+    'G.info(`computer_use_node_repl_js_call`,{safe:{namespace:$1.namespace??null,tool:$2,codePrefix:String($1.arguments?.code??``).slice(0,500),hasSetupComputerUseRuntime:String($1.arguments?.code??``).includes(`setupComputerUseRuntime`),hasDirectSkyImport:String($1.arguments?.code??``).includes(`@oai/sky`),hasListApps:String($1.arguments?.code??``).includes(`list_apps`),resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0},sensitive:{}});' +
+    '_codexOfflineNodeReplResponse={contentItems:[{type:`inputText`,text:_codexOfflineNodeReplText}],success:_codexOfflineNodeReplResult?.isError!==!0}' +
+    '}catch(_codexOfflineNodeReplError){_codexOfflineNodeReplResponse=Ge(String(_codexOfflineNodeReplError?.message??_codexOfflineNodeReplError))}' +
+    COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER +
+    'X.dispatchMessage(`mcp-response`,{hostId:$4,response:{id:a($5),result:_codexOfflineNodeReplResponse}});return}';
   // ── Patch 36: Keep bundled browser plugins in runtime marketplace ─────
   const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER =
     contractPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
@@ -1243,6 +1879,7 @@ try {
   const IN_APP_BROWSER_DESCRIPTOR_PATCHED_RE =
     /\{installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.On,isAvailable:\(\{buildFlavor:[A-Za-z_$][\w$]*,features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0\}/;
   const BUNDLED_RUNTIME_PLUGIN_NAMES = [
+    'computer-use',
     'documents',
     'spreadsheets',
     'presentations',
@@ -1352,6 +1989,101 @@ try {
   if (!settingsHandlerSeen) {
     warn('Could not locate the "not implemented" throw for show-settings. ' +
          'Settings patch skipped (the app version may have changed).');
+  }
+
+  // A previous portable-startup guard removed the CommonJS namespace wrapper
+  // around the Electron module. That avoided autoUpdater reads, but it also
+  // removed the `.default` export shape used by newer main bundles
+  // (`electronNamespace.default.app`). Restore that wrapper when repatching an
+  // affected build; the actual autoUpdater read is disabled below in Sentry's
+  // breadcrumb setup.
+  const electronNamespaceRestoredFiles = [];
+  const electronNamespaceLegacyRe =
+    /let ([A-Za-z_$][\w$]*)=require\(`electron`\);\/\*codex-offline:electron-namespace-no-auto-updater\*\//g;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (!electronNamespaceLegacyRe.test(content)) {
+      electronNamespaceLegacyRe.lastIndex = 0;
+      continue;
+    }
+
+    const helperMatch = content.match(
+      /(?:const|let|var) ([A-Za-z_$][\w$]*)=require\(`\.\/src-[^`]+\.js`\)/,
+    );
+    if (!helperMatch) {
+      electronNamespaceLegacyRe.lastIndex = 0;
+      warn(
+        'Found legacy Electron namespace patch but could not resolve the ' +
+        `namespace helper in ${path.relative(tmpDir, filePath)}.`,
+      );
+      continue;
+    }
+
+    const helperVar = helperMatch[1];
+    electronNamespaceLegacyRe.lastIndex = 0;
+    content = content.replaceAll(
+      electronNamespaceLegacyRe,
+      `let $1=require(\`electron\`);$1=${helperVar}.Hi($1);`,
+    );
+    electronNamespaceLegacyRe.lastIndex = 0;
+    fs.writeFileSync(filePath, content, 'utf8');
+    electronNamespaceRestoredFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (electronNamespaceRestoredFiles.length > 0) {
+    log(
+      'Legacy Electron namespace startup guard restored in ' +
+      `${electronNamespaceRestoredFiles.join(', ')}.`,
+    );
+  }
+
+  // Newer Windows Store builds expose electron.autoUpdater through an MSIX
+  // native binding. Portable offline launches do not have that binding, and
+  // Sentry's default Electron breadcrumb setup reads autoUpdater during
+  // bootstrap. Disable only that breadcrumb hook so startup does not abort.
+  const autoUpdaterBreadcrumbPatchedFiles = [];
+  const autoUpdaterBreadcrumbAlreadyCorrectFiles = [];
+  const autoUpdaterBreadcrumbNeedle = 'autoUpdater:()=>!0';
+  const autoUpdaterBreadcrumbReplacement =
+    `autoUpdater:()=>!1${DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER}`;
+  const autoUpdaterBreadcrumbSetupNeedle =
+    'n.autoUpdater&&a(t.autoUpdater,`autoUpdater`,n.autoUpdater)';
+  const autoUpdaterBreadcrumbSetupReplacement =
+    `!1&&a(t.autoUpdater,\`autoUpdater\`,n.autoUpdater)${DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER}`;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const alreadyCorrect = content.includes(DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER);
+    if (!content.includes(autoUpdaterBreadcrumbNeedle) &&
+        !content.includes(autoUpdaterBreadcrumbSetupNeedle)) {
+      if (alreadyCorrect) {
+        autoUpdaterBreadcrumbAlreadyCorrectFiles.push(path.relative(tmpDir, filePath));
+      }
+      continue;
+    }
+
+    content = content.replaceAll(
+      autoUpdaterBreadcrumbNeedle,
+      autoUpdaterBreadcrumbReplacement,
+    ).replaceAll(
+      autoUpdaterBreadcrumbSetupNeedle,
+      autoUpdaterBreadcrumbSetupReplacement,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    autoUpdaterBreadcrumbPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (autoUpdaterBreadcrumbPatchedFiles.length > 0) {
+    log(
+      'Electron autoUpdater breadcrumb disabled for portable startup in ' +
+      `${autoUpdaterBreadcrumbPatchedFiles.join(', ')}.`,
+    );
+  } else if (autoUpdaterBreadcrumbAlreadyCorrectFiles.length > 0) {
+    log('Electron autoUpdater breadcrumb already disabled for portable startup.');
+  } else {
+    warn('Could not locate Electron autoUpdater breadcrumb defaults. ' +
+         'Portable startup guard skipped (the app version may have changed).');
   }
 
   // ── Patch 8: Normalize Windows automation cwd paths at runtime ───────
@@ -1501,6 +2233,599 @@ try {
     );
   }
 
+  // ── Patch 41: Enable node_repl config for offline Computer Use ─────────
+  const nodeReplFeatureConfigPatchedFiles = [];
+  let nodeReplFeatureConfigPatched = false;
+  let nodeReplFeatureConfigAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (NODE_REPL_FEATURE_CONFIG_PATCHED_RE.test(content)) {
+      nodeReplFeatureConfigAlreadyCorrect = true;
+      nodeReplFeatureConfigPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    NODE_REPL_FEATURE_CONFIG_RE.lastIndex = 0;
+    if (!NODE_REPL_FEATURE_CONFIG_RE.test(content)) continue;
+
+    NODE_REPL_FEATURE_CONFIG_RE.lastIndex = 0;
+    content = content.replace(
+      NODE_REPL_FEATURE_CONFIG_RE,
+      `$1!0${NODE_REPL_FEATURE_ENABLED_PATCH_MARKER}$3`,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    nodeReplFeatureConfigPatched = true;
+    nodeReplFeatureConfigPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (nodeReplFeatureConfigPatched) {
+    log('Node REPL feature config default enabled in ' +
+        `${nodeReplFeatureConfigPatchedFiles.join(', ')}.`);
+  } else if (nodeReplFeatureConfigAlreadyCorrect) {
+    log('Node REPL feature config default already enabled.');
+  } else {
+    throw new Error(
+      'Could not locate Browser Use thread config features.js_repl default. ' +
+      'Computer Use may not receive the official JavaScript execution tool.',
+    );
+  }
+
+  const featureOverridesConfigNamespacePatchedFiles = [];
+  let featureOverridesConfigNamespacePatched = false;
+  let featureOverridesConfigNamespaceAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER)) {
+      if (!FEATURE_OVERRIDES_TOOL_SEARCH_PATCHED_RE.test(content)) {
+        let patchedContent = content.replace(
+          FEATURE_OVERRIDES_UNIFIED_EXEC_ONLY_RE,
+          'return $1[`features.unified_exec`]=!0,$1[`features.tool_search`]=!0,' +
+            '$1[`features.js_repl_tools_only`]=!0,$1[`features.tool_suggest`]=!0,' +
+            '$1[`features.tool_search_always_defer_mcp_tools`]=!0,' +
+            '$1[`features.non_prefixed_mcp_tool_names`]=!0,' +
+            '$1[`features.unavailable_dummy_tools`]=!0,$1}' +
+            FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER,
+        );
+        if (patchedContent === content) {
+          patchedContent = content.replace(
+            FEATURE_OVERRIDES_TOOL_SEARCH_ONLY_RE,
+            'return $1[`features.unified_exec`]=!0,$1[`features.tool_search`]=!0,' +
+              '$1[`features.js_repl_tools_only`]=!0,$1[`features.tool_suggest`]=!0,' +
+              '$1[`features.tool_search_always_defer_mcp_tools`]=!0,' +
+              '$1[`features.non_prefixed_mcp_tool_names`]=!0,' +
+              '$1[`features.unavailable_dummy_tools`]=!0,$1}' +
+              FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER,
+          );
+        }
+        if (patchedContent === content) {
+          patchedContent = content.replace(
+            FEATURE_OVERRIDES_TOOL_SEARCH_JS_REPL_ONLY_RE,
+            'return $1[`features.unified_exec`]=!0,$1[`features.tool_search`]=!0,' +
+              '$1[`features.js_repl_tools_only`]=!0,$1[`features.tool_suggest`]=!0,' +
+              '$1[`features.tool_search_always_defer_mcp_tools`]=!0,' +
+              '$1[`features.non_prefixed_mcp_tool_names`]=!0,' +
+              '$1[`features.unavailable_dummy_tools`]=!0,$1}' +
+              FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER,
+          );
+        }
+        if (patchedContent === content) {
+          patchedContent = content.replace(
+            FEATURE_OVERRIDES_TOOL_SUGGEST_ONLY_RE,
+            'return $1[`features.unified_exec`]=!0,$1[`features.tool_search`]=!0,' +
+              '$1[`features.js_repl_tools_only`]=!0,$1[`features.tool_suggest`]=!0,' +
+              '$1[`features.tool_search_always_defer_mcp_tools`]=!0,' +
+              '$1[`features.non_prefixed_mcp_tool_names`]=!0,' +
+              '$1[`features.unavailable_dummy_tools`]=!0,$1}' +
+              FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER,
+          );
+        }
+        if (patchedContent === content) {
+          throw new Error(
+            'Could not upgrade feature override config merge to preserve ' +
+            'Computer Use MCP discovery feature flags.',
+          );
+        }
+        content = patchedContent;
+        fs.writeFileSync(filePath, content, 'utf8');
+        featureOverridesConfigNamespacePatched = true;
+      } else {
+        featureOverridesConfigNamespaceAlreadyCorrect = true;
+      }
+      featureOverridesConfigNamespacePatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    FEATURE_OVERRIDES_CONFIG_NAMESPACE_RE.lastIndex = 0;
+    if (!FEATURE_OVERRIDES_CONFIG_NAMESPACE_RE.test(content)) continue;
+
+    content = content.replace(
+      FEATURE_OVERRIDES_CONFIG_NAMESPACE_RE,
+      (
+        _match,
+        functionName,
+        inputVar,
+        outputVar,
+        keyVar,
+        valueVar,
+        normalizedKeyVar,
+        stripPrefixFunction,
+        unsupportedFeaturesSet,
+        ensureFeaturePrefixFunction,
+      ) =>
+        `function ${functionName}(${inputVar}){let ${outputVar}={};` +
+        `for(let[${keyVar},${valueVar}]of Object.entries(${inputVar})){` +
+        `if(${keyVar}.startsWith(\`mcp_servers.\`)){${outputVar}[${keyVar}]=${valueVar};continue}` +
+        `let ${normalizedKeyVar}=${stripPrefixFunction}(${keyVar});` +
+        `${unsupportedFeaturesSet}.has(${normalizedKeyVar})||` +
+        `(${outputVar}[${ensureFeaturePrefixFunction}(${normalizedKeyVar})]=${valueVar})}` +
+        `return ${outputVar}[\`features.unified_exec\`]=!0,` +
+        `${outputVar}[\`features.tool_search\`]=!0,` +
+        `${outputVar}[\`features.js_repl_tools_only\`]=!0,` +
+        `${outputVar}[\`features.tool_suggest\`]=!0,` +
+        `${outputVar}[\`features.tool_search_always_defer_mcp_tools\`]=!0,` +
+        `${outputVar}[\`features.non_prefixed_mcp_tool_names\`]=!0,` +
+        `${outputVar}[\`features.unavailable_dummy_tools\`]=!0,${outputVar}}` +
+        FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    featureOverridesConfigNamespacePatched = true;
+    featureOverridesConfigNamespacePatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (featureOverridesConfigNamespacePatched) {
+    log('Feature override config namespace preservation patched in ' +
+        `${featureOverridesConfigNamespacePatchedFiles.join(', ')}.`);
+  } else if (featureOverridesConfigNamespaceAlreadyCorrect) {
+    log('Feature override config namespace preservation already patched.');
+  } else {
+    throw new Error(
+      'Could not locate feature override config merge function. ' +
+      'Computer Use may lose mcp_servers.node_repl before thread startup.',
+    );
+  }
+
+  const bundledPluginCacheLockNonfatalPatchedFiles = [];
+  let bundledPluginCacheLockNonfatalPatched = false;
+  let bundledPluginCacheLockNonfatalAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const originalContent = content;
+
+    if (content.includes(BUNDLED_PLUGIN_CACHE_LOCK_THROW_NEEDLE)) {
+      content = content.replace(
+        BUNDLED_PLUGIN_CACHE_LOCK_THROW_NEEDLE,
+        BUNDLED_PLUGIN_CACHE_LOCK_THROW_REPLACEMENT,
+      );
+    }
+
+    content = content.replace(
+      BUNDLED_PLUGIN_CACHE_LOCK_THROW_RE,
+      (match, resultVar, loggerVar, categoryFn) =>
+        `if(${resultVar}!=null){let _codexOfflinePluginCacheCategory=${categoryFn}({error:${resultVar}.error,platformFamily:e.platformFamily});` +
+        `if(${loggerVar}.warning(\`bundled_plugins_marketplace_install_failed\`,{safe:{errorCategory:_codexOfflinePluginCacheCategory,marketplaceName:t,platformFamily:e.platformFamily,...${resultVar}.safe},sensitive:{error:${resultVar}.error,marketplaceRoot:e.materializedMarketplace.marketplaceRoot,...${resultVar}.sensitive}}),` +
+        `n&&_codexOfflinePluginCacheCategory!==${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE})throw ${resultVar}.error;` +
+        `return _codexOfflinePluginCacheCategory===${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE}` +
+        BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER +
+        '}return!0}',
+    );
+
+    content = content.replace(
+      BUNDLED_PLUGIN_CACHE_LOCK_CATCH_THROW_RE,
+      (match, errorVar, loggerVar, categoryFn) =>
+        `catch(${errorVar}){let _codexOfflinePluginCacheCategory=${categoryFn}({error:${errorVar},platformFamily:e.platformFamily});` +
+        `if(${loggerVar}.warning(\`bundled_plugins_marketplace_install_failed\`,{safe:{errorCategory:_codexOfflinePluginCacheCategory,marketplaceName:t,platformFamily:e.platformFamily},sensitive:{error:${errorVar},marketplaceRoot:e.materializedMarketplace.marketplaceRoot}}),` +
+        `n&&_codexOfflinePluginCacheCategory!==${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE})throw ${errorVar};` +
+        `return _codexOfflinePluginCacheCategory===${BUNDLED_PLUGIN_CACHE_LOCK_CATEGORY_VALUE}` +
+        BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER +
+        '}',
+    );
+
+    if (content !== originalContent) {
+      fs.writeFileSync(filePath, content, 'utf8');
+      bundledPluginCacheLockNonfatalPatched = true;
+      bundledPluginCacheLockNonfatalPatchedFiles.push(path.relative(tmpDir, filePath));
+    } else if (content.includes(BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER)) {
+      bundledPluginCacheLockNonfatalAlreadyCorrect = true;
+      bundledPluginCacheLockNonfatalPatchedFiles.push(path.relative(tmpDir, filePath));
+    }
+  }
+
+  if (bundledPluginCacheLockNonfatalPatched) {
+    log('Bundled plugin cache lock failures are nonfatal on Windows in ' +
+        `${bundledPluginCacheLockNonfatalPatchedFiles.join(', ')}.`);
+  } else if (bundledPluginCacheLockNonfatalAlreadyCorrect) {
+    log('Bundled plugin cache lock failure handling already patched.');
+  } else {
+    throw new Error(
+      'Could not locate bundled plugin cache lock failure handling. ' +
+      'A locked Chrome plugin cache can still abort Computer Use plugin installation.',
+    );
+  }
+
+  const nodeReplDisableSandboxPatchedFiles = [];
+  let nodeReplDisableSandboxPatched = false;
+  let nodeReplDisableSandboxAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER)) {
+      const originalContent = content;
+      if (!content.includes(NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER)) {
+        content = content.replace(
+          NODE_REPL_TOOL_SEARCH_FEATURE_UPGRADE_RE,
+          NODE_REPL_TOOL_SEARCH_FEATURE_UPGRADE_REPLACEMENT,
+        );
+        if (!content.includes(NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER)) {
+          throw new Error(
+            'Could not locate legacy node_repl --disable-sandbox patch to ' +
+            'upgrade with features.tool_search for Computer Use.',
+          );
+        }
+      } else if (NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_RE.test(content)) {
+        content = content.replace(
+          NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_RE,
+          NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_REPLACEMENT,
+        );
+      }
+      if (
+        !content.includes(COMPUTER_USE_THREAD_CONFIG_DIAGNOSTICS_PATCH_MARKER) &&
+        content.includes(NODE_REPL_DISABLE_SANDBOX_LEGACY_DIAGNOSTICS_NEEDLE)
+      ) {
+        content = content.replace(
+          NODE_REPL_DISABLE_SANDBOX_LEGACY_DIAGNOSTICS_NEEDLE,
+          NODE_REPL_DISABLE_SANDBOX_LEGACY_DIAGNOSTICS_REPLACEMENT,
+        );
+      }
+      if (content !== originalContent) {
+        fs.writeFileSync(filePath, content, 'utf8');
+        nodeReplDisableSandboxPatched = true;
+      } else {
+        nodeReplDisableSandboxAlreadyCorrect = true;
+      }
+      nodeReplDisableSandboxPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    if (content.includes(NODE_REPL_DISABLE_SANDBOX_NEEDLE)) {
+      content = content.replace(
+        NODE_REPL_DISABLE_SANDBOX_NEEDLE,
+        NODE_REPL_DISABLE_SANDBOX_REPLACEMENT,
+      );
+    } else if (NODE_REPL_CONFIG_HELPER_RE.test(content)) {
+      content = content.replace(
+        NODE_REPL_CONFIG_HELPER_RE,
+        NODE_REPL_CONFIG_HELPER_REPLACEMENT,
+      );
+    } else {
+      continue;
+    }
+    fs.writeFileSync(filePath, content, 'utf8');
+    nodeReplDisableSandboxPatched = true;
+    nodeReplDisableSandboxPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (nodeReplDisableSandboxPatched) {
+    log('Node REPL sandbox bypass argument patched in ' +
+        `${nodeReplDisableSandboxPatchedFiles.join(', ')}.`);
+  } else if (nodeReplDisableSandboxAlreadyCorrect) {
+    log('Node REPL sandbox bypass argument already patched.');
+  } else {
+    throw new Error(
+      'Could not locate Browser Use thread config generation to add ' +
+      'node_repl --disable-sandbox for offline Windows Computer Use.',
+    );
+  }
+
+  const computerUsePluginRootFallbackPatchedFiles = [];
+  let computerUsePluginRootFallbackPatched = false;
+  let computerUsePluginRootFallbackAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER)) {
+      computerUsePluginRootFallbackAlreadyCorrect = true;
+      computerUsePluginRootFallbackPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    if (content.includes(COMPUTER_USE_PLUGIN_ROOT_FALLBACK_NEEDLE)) {
+      content = content.replace(
+        COMPUTER_USE_PLUGIN_ROOT_FALLBACK_NEEDLE,
+        COMPUTER_USE_PLUGIN_ROOT_FALLBACK_REPLACEMENT,
+      );
+    } else if (COMPUTER_USE_PLUGIN_ROOT_FALLBACK_CURRENT_RE.test(content)) {
+      content = content.replace(
+        COMPUTER_USE_PLUGIN_ROOT_FALLBACK_CURRENT_RE,
+        (
+          match,
+          functionName,
+          codexHomeVar,
+          envVar,
+          marketplaceNameVar,
+          pluginPathNamespace,
+          buildFlavorNamespace,
+          marketplacesVar,
+          pathExistsVar,
+          fsNamespace,
+          marketplaceVar,
+          listMarketplacesFunction,
+          installedPluginVar,
+          pluginEntryVar,
+          computerUsePathsFunction,
+          pluginRootFunction,
+        ) =>
+          `function ${functionName}({codexHome:${codexHomeVar},env:${envVar}=process.env,` +
+          `marketplaceName:${marketplaceNameVar}=${pluginPathNamespace}.or(${buildFlavorNamespace}.M.resolve()),` +
+          `marketplaces:${marketplacesVar},pathExists:${pathExistsVar}=${fsNamespace}.existsSync})` +
+          `{for(let ${marketplaceVar} of ${listMarketplacesFunction}({marketplaceName:${marketplaceNameVar},marketplaces:${marketplacesVar}}))` +
+          `{let ${installedPluginVar}=${marketplaceVar}.plugins.find(${pluginEntryVar}=>${pluginEntryVar}.name===\`computer-use\`&&${pluginEntryVar}.installed&&${pluginEntryVar}.enabled&&${pluginEntryVar}.source.type===\`local\`);` +
+          `if(${installedPluginVar}?.source.type===\`local\`)return ${computerUsePathsFunction}({env:${envVar},installedPluginRoot:${pluginPathNamespace}.${pluginRootFunction}({codexHome:${codexHomeVar},localVersion:${installedPluginVar}.localVersion,marketplaceName:${marketplaceVar}.name,pluginName:${installedPluginVar}.name}),pathExists:${pathExistsVar}});` +
+          `let u=${marketplaceVar}.plugins.find(e=>e.name===\`computer-use\`&&(e.source?.type===\`local\`||e.source?.source===\`local\`)),d=u?.source?.path??null,` +
+          `f=d==null?null:/^(?:[A-Za-z]:[\\\\/]|\\\\\\\\)/.test(d)?d:${marketplaceVar}.path!=null?\`${'${'}String(${marketplaceVar}.path).replace(/[\\\\/]+$/,\`\`)}\\\\${'${'}String(d).replace(/^\\\\.?[\\\\/]/,\`\`)}\`:null;` +
+          `if(f!=null&&${pathExistsVar}(f))return ${computerUsePathsFunction}({env:${envVar},installedPluginRoot:f,pathExists:${pathExistsVar}})}` +
+          COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER +
+          `return ${computerUsePathsFunction}({env:${envVar},pathExists:${pathExistsVar}})}`,
+      );
+    } else {
+      continue;
+    }
+    fs.writeFileSync(filePath, content, 'utf8');
+    computerUsePluginRootFallbackPatched = true;
+    computerUsePluginRootFallbackPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (computerUsePluginRootFallbackPatched) {
+    log('Computer Use plugin root fallback patched in ' +
+        `${computerUsePluginRootFallbackPatchedFiles.join(', ')}.`);
+  } else if (computerUsePluginRootFallbackAlreadyCorrect) {
+    log('Computer Use plugin root fallback already patched.');
+  } else {
+    throw new Error(
+      'Could not locate Computer Use installed plugin path resolver. ' +
+      'node_repl may start without the packaged Computer Use plugin runtime paths.',
+    );
+  }
+
+  const computerUseForwardThreadStartDiagnosticsPatchedFiles = [];
+  let computerUseForwardThreadStartDiagnosticsPatched = false;
+  let computerUseForwardThreadStartDiagnosticsAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER)) {
+      let patchedContent = content;
+      if (patchedContent.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_LEGACY_CODE)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_LEGACY_CODE,
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE,
+        );
+      }
+      if (patchedContent.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_JS_REPL_ONLY_CODE)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_JS_REPL_ONLY_CODE,
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE,
+        );
+      }
+      if (patchedContent.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_TOOL_SUGGEST_ONLY_CODE)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_TOOL_SUGGEST_ONLY_CODE,
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE,
+        );
+      }
+      if (patchedContent.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_FULL_FLAGS_ONLY_CODE)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_FULL_FLAGS_ONLY_CODE,
+          COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE,
+        );
+      }
+      if (!patchedContent.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER,
+          COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER +
+            COMPUTER_USE_THREAD_START_TOOL_SEARCH_CODE,
+        );
+      }
+      if (!patchedContent.includes(COMPUTER_USE_INPUT_SKILL_PATCH_MARKER)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER,
+          COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_PATCH_MARKER +
+            COMPUTER_USE_INPUT_SKILL_INJECTION_CODE,
+        );
+      }
+      if (!patchedContent.includes(
+        COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_PATCH_MARKER,
+      )) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_INPUT_SKILL_PATCH_MARKER,
+          COMPUTER_USE_INPUT_SKILL_PATCH_MARKER +
+            COMPUTER_USE_THREAD_START_TOOL_CONTEXT_DIAGNOSTICS_CODE,
+        );
+      }
+      if (
+        patchedContent.includes(COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER)
+      ) {
+        // Already has the current diagnostics shape. The optional mutations
+        // above upgrade older builds so Computer Use context is observable.
+      } else if (
+        patchedContent.includes(COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER)
+      ) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_SAFE_FIELDS,
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_SAFE_FIELDS,
+        );
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER,
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER +
+            COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER,
+        );
+      } else if (patchedContent.includes(COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER)) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_SAFE_FIELDS,
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_SAFE_FIELDS,
+        );
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER,
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_PATCH_MARKER +
+            COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V2_PATCH_MARKER +
+            COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_V3_PATCH_MARKER,
+        );
+      } else if (
+        patchedContent.includes(COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_NEEDLE)
+      ) {
+        patchedContent = patchedContent.replace(
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_NEEDLE,
+          COMPUTER_USE_FORWARD_INPUT_DIAGNOSTICS_LEGACY_REPLACEMENT,
+        );
+      }
+      if (patchedContent !== content) {
+        content = patchedContent;
+        fs.writeFileSync(filePath, content, 'utf8');
+        computerUseForwardThreadStartDiagnosticsPatched = true;
+      } else {
+        computerUseForwardThreadStartDiagnosticsAlreadyCorrect = true;
+      }
+      computerUseForwardThreadStartDiagnosticsPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    if (!content.includes(COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_NEEDLE)) continue;
+
+    content = content.replace(
+      COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_NEEDLE,
+      COMPUTER_USE_FORWARD_THREAD_START_DIAGNOSTICS_REPLACEMENT,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    computerUseForwardThreadStartDiagnosticsPatched = true;
+    computerUseForwardThreadStartDiagnosticsPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (computerUseForwardThreadStartDiagnosticsPatched) {
+    log('Computer Use thread/start forwarding diagnostics patched in ' +
+        `${computerUseForwardThreadStartDiagnosticsPatchedFiles.join(', ')}.`);
+  } else if (computerUseForwardThreadStartDiagnosticsAlreadyCorrect) {
+    log('Computer Use thread/start forwarding diagnostics already patched.');
+  } else {
+    warn(
+      'Could not locate thread/start forwarding code for Computer Use diagnostics. ' +
+      'The package can still run, but E2E logs will not show forwarded node_repl config.',
+    );
+  }
+
+  const computerUseMcpStatusDiagnosticsPatchedFiles = [];
+  let computerUseMcpStatusDiagnosticsPatched = false;
+  let computerUseMcpStatusDiagnosticsAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(COMPUTER_USE_MCP_STATUS_DIAGNOSTICS_PATCH_MARKER)) {
+      computerUseMcpStatusDiagnosticsAlreadyCorrect = true;
+      computerUseMcpStatusDiagnosticsPatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+    if (!content.includes(COMPUTER_USE_MCP_STATUS_RESPONSE_NEEDLE)) continue;
+
+    content = content.replace(
+      COMPUTER_USE_MCP_STATUS_RESPONSE_NEEDLE,
+      COMPUTER_USE_MCP_STATUS_RESPONSE_REPLACEMENT,
+    );
+    fs.writeFileSync(filePath, content, 'utf8');
+    computerUseMcpStatusDiagnosticsPatched = true;
+    computerUseMcpStatusDiagnosticsPatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (computerUseMcpStatusDiagnosticsPatched) {
+    log('Computer Use MCP status diagnostics patched in ' +
+        `${computerUseMcpStatusDiagnosticsPatchedFiles.join(', ')}.`);
+  } else if (computerUseMcpStatusDiagnosticsAlreadyCorrect) {
+    log('Computer Use MCP status diagnostics already patched.');
+  } else {
+    warn(
+      'Could not locate mcpServerStatus/list response routing code for Computer Use diagnostics.',
+    );
+  }
+
+  const nodeReplConfigReconcilePatchedFiles = [];
+  let nodeReplConfigReconcilePatched = false;
+  let nodeReplConfigReconcileAlreadyCorrect = false;
+
+  for (const filePath of mainBundleFiles) {
+    let content = fs.readFileSync(filePath, 'utf8');
+    if (content.includes(NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER)) {
+      nodeReplConfigReconcileAlreadyCorrect = true;
+      nodeReplConfigReconcilePatchedFiles.push(path.relative(tmpDir, filePath));
+      continue;
+    }
+
+    if (content.includes(NODE_REPL_CONFIG_RECONCILE_FINAL_STEP)) {
+      content = content.replace(
+        NODE_REPL_CONFIG_RECONCILE_FINAL_STEP,
+        NODE_REPL_CONFIG_RECONCILE_FINAL_STEP_REPLACEMENT,
+      );
+    } else if (NODE_REPL_CONFIG_RECONCILE_FINAL_STEP_CURRENT_RE.test(content)) {
+      content = content.replace(
+        NODE_REPL_CONFIG_RECONCILE_FINAL_STEP_CURRENT_RE,
+        (
+          _match,
+          reconcileFn,
+          appServerConnection,
+          browserSkillVariant,
+          chromeExtensionSyncManagedPluginStore,
+          devRuntimeRepoRoot,
+          marketplaceDescriptorSource,
+          forceInstallPluginNames,
+          installWhenMissingPluginNames,
+          syncInstallStateWithChromeExtensionPluginNames,
+          marketplaceName,
+          resourcesPath,
+          runtimeMarketplaceRoot,
+          descriptorVar,
+          refreshNodeReplConfigFn,
+          platform,
+        ) =>
+          `try{await ${reconcileFn}({appServerConnection:${appServerConnection},` +
+          `browserSkillVariant:${browserSkillVariant},` +
+          `chromeExtensionSyncManagedPluginStore:${chromeExtensionSyncManagedPluginStore},` +
+          `devRuntimeRepoRoot:${devRuntimeRepoRoot},` +
+          `marketplacePluginNames:${marketplaceDescriptorSource}.marketplacePluginNames,` +
+          `forceInstallPluginNames:${forceInstallPluginNames},` +
+          `installWhenMissingPluginNames:${installWhenMissingPluginNames},` +
+          `syncInstallStateWithChromeExtensionPluginNames:${syncInstallStateWithChromeExtensionPluginNames},` +
+          `marketplaceName:${marketplaceName},resourcesPath:${resourcesPath},` +
+          `runtimeMarketplaceRoot:${runtimeMarketplaceRoot}}),await Promise.all(` +
+          `${marketplaceDescriptorSource}.marketplacePluginDescriptors.map(async ${descriptorVar}=>{` +
+          `${descriptorVar}.migrate!=null&&await ${descriptorVar}.migrate({` +
+          `appServerConnection:${appServerConnection},codexHome:e.codexHome,` +
+          `marketplaceName:${marketplaceName},trashItem:e.trashItem})}))}finally{` +
+          `await ${refreshNodeReplConfigFn}({appServerConnection:${appServerConnection},` +
+          `desktopFeatureAvailability:${marketplaceDescriptorSource}.desktopFeatureAvailability,` +
+          `isPackaged:e.isPackaged,platform:${platform},repoRoot:e.repoRoot,` +
+          `resourcesPath:${resourcesPath}})}` +
+          NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER +
+          ';',
+      );
+    } else {
+      continue;
+    }
+    fs.writeFileSync(filePath, content, 'utf8');
+    nodeReplConfigReconcilePatched = true;
+    nodeReplConfigReconcilePatchedFiles.push(path.relative(tmpDir, filePath));
+  }
+
+  if (nodeReplConfigReconcilePatched) {
+    log('Node REPL config reconcile finalizer patched in ' +
+        `${nodeReplConfigReconcilePatchedFiles.join(', ')}.`);
+  } else if (nodeReplConfigReconcileAlreadyCorrect) {
+    log('Node REPL config reconcile finalizer already patched.');
+  } else {
+    throw new Error(
+      'Could not locate bundled plugin reconcile tail to guarantee node_repl ' +
+      'config refresh after plugin reconcile failures.',
+    );
+  }
+
   const bundledBrowserPluginsPatch = patchBundledBrowserPlugins(mainBundleFiles, {
     browserUseDescriptorPatchedRe: BROWSER_USE_DESCRIPTOR_PATCHED_RE,
     browserUseDescriptorRe: BROWSER_USE_DESCRIPTOR_RE,
@@ -1538,6 +2863,7 @@ try {
     {
       filterRe: BUNDLED_RUNTIME_MARKETPLACE_FILTER_RE,
       patchMarker: BUNDLED_RUNTIME_MARKETPLACE_FILTER_PATCH_MARKER,
+      pluginNames: BUNDLED_RUNTIME_PLUGIN_NAMES,
       pluginNamesJson: JSON.stringify(BUNDLED_RUNTIME_PLUGIN_NAMES),
     },
   );
@@ -1708,6 +3034,8 @@ try {
     /([,;]\s*\w+=)\s*[$\w]+\([$\w]+,`2553306736`\)/g;
   const PR_ICONS_GATE_STORE_GET_RE =
     /[$\w]+\([$\w]+\([$\w]+,`2553306736`\)\)/g;
+  const PR_ICONS_GATE_DEFAULT_VALUE_RE =
+    /([,;{]\s*let\s+[A-Za-z_$][\w$]*=)\s*[$\w]+\([$\w]+,`2553306736`\)/g;
   const PR_ICONS_GATE_REPLACEMENT = '!0';
   // ≥ 26.429.x: extracted to a standalone hook.
   const PR_ICONS_GATE_FUNCTION_RE =
@@ -2060,6 +3388,10 @@ try {
       '`' +
       String.raw`,)!0(\))`,
   );
+  const FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:feature-enablement-preserve-unified-exec*/');
+  const FEATURE_ENABLEMENT_LOCAL_STATE_RE =
+    /if\(([A-Za-z_$][\w$]*)&&\(0,([A-Za-z_$][\w$]*)\.default\)\(\1,([A-Za-z_$][\w$]*)\)\)return \1;let ([A-Za-z_$][\w$]*)=Object\.entries\(\3\)\.filter\(([A-Za-z_$][\w$]*)\)\.map\(([A-Za-z_$][\w$]*)\);return \4\.length>0&&([A-Za-z_$][\w$]*)\.info\(`Features enabled`,\{safe:\{enabledFeatures:\4\.join\(`, `\)\},sensitive:\{\}\}\),\3/;
 
   const AUTOMATION_DIALOG_CWD_PATCHES = [
     {
@@ -2190,6 +3522,18 @@ try {
     let contextUsageStatusSectionPatched = false;
     let contextUsageStatusSectionSeen = false;
     let contextUsageStatusSectionAlreadyCorrect = false;
+    let featureEnablementUnifiedExecPatched = false;
+    let featureEnablementUnifiedExecSeen = false;
+    let featureEnablementUnifiedExecAlreadyCorrect = false;
+    let computerUseInputMentionPatched = false;
+    let computerUseInputMentionSeen = false;
+    let computerUseInputMentionAlreadyCorrect = false;
+    let computerUseNodeReplDynamicToolPatched = false;
+    let computerUseNodeReplDynamicToolSeen = false;
+    let computerUseNodeReplDynamicToolAlreadyCorrect = false;
+    let computerUseNodeReplDynamicToolCallPatched = false;
+    let computerUseNodeReplDynamicToolCallSeen = false;
+    let computerUseNodeReplDynamicToolCallAlreadyCorrect = false;
 
     for (const file of assetFiles) {
       if (!file.endsWith('.js')) continue;
@@ -2233,9 +3577,11 @@ try {
         PR_ICONS_GATE_INLINE_RE.test(originalContent) ||
         PR_ICONS_GATE_HOOK_RE.test(originalContent) ||
         PR_ICONS_GATE_STORE_GET_RE.test(originalContent) ||
+        PR_ICONS_GATE_DEFAULT_VALUE_RE.test(originalContent) ||
         PR_ICONS_GATE_FUNCTION_RE.test(originalContent);
       PR_ICONS_GATE_HOOK_RE.lastIndex = 0;
       PR_ICONS_GATE_STORE_GET_RE.lastIndex = 0;
+      PR_ICONS_GATE_DEFAULT_VALUE_RE.lastIndex = 0;
       memoriesGateSeen ||=
         originalContent.includes(MEMORIES_GATE_CURRENT_PATTERN) ||
         MEMORIES_GATE_INLINE_RE.test(originalContent) ||
@@ -2325,6 +3671,272 @@ try {
         originalContent.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER);
       contextUsageStatusSectionAlreadyCorrect ||=
         originalContent.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER);
+      computerUseInputMentionSeen ||=
+        originalContent.includes(COMPUTER_USE_INPUT_MENTION_PATCH_MARKER) ||
+        COMPUTER_USE_INPUT_MENTION_PATCHES.some(patch => originalContent.includes(patch.needle)) ||
+        COMPUTER_USE_INPUT_MENTION_CURRENT_TEST_RE.test(originalContent);
+      computerUseInputMentionAlreadyCorrect ||=
+        originalContent.includes(COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER);
+      computerUseNodeReplDynamicToolSeen ||=
+        originalContent.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) ||
+        (
+          originalContent.includes('async function st({featureOverrides:') &&
+          originalContent.includes('namespace:Q')
+        );
+      computerUseNodeReplDynamicToolAlreadyCorrect ||=
+        originalContent.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER);
+      computerUseNodeReplDynamicToolCallSeen ||=
+        originalContent.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) ||
+        (
+          originalContent.includes('Unsupported dynamic tool namespace') &&
+          originalContent.includes('mcp-response')
+        );
+      computerUseNodeReplDynamicToolCallAlreadyCorrect ||=
+        originalContent.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER);
+
+      if (
+        !content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) &&
+        COMPUTER_USE_NODE_REPL_DYNAMIC_TOOLS_RETURN_RE.test(content)
+      ) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOLS_RETURN_RE,
+          `return[${COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_SPEC},` +
+            `${COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_SPEC},...$1]` +
+            COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER,
+        );
+        computerUseNodeReplDynamicToolPatched = true;
+        modified = true;
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) &&
+        content.includes('name:`mcp__node_repl__js`')
+      ) {
+        const upgradedContent = content.replace(
+          /\(\{namespace:`codex_app`,name:`mcp__node_repl__js`,description:`Execute JavaScript in the persistent Node REPL used by Computer Use\. This forwards to node_repl\.js\.`,inputSchema:\{type:`object`,additionalProperties:!1,properties:\{code:\{type:`string`,description:`JavaScript source to execute in the persistent Node-backed kernel\.`\},timeout_ms:\{type:`integer`,minimum:1,description:`Optional execution timeout in milliseconds\.`\},title:\{type:`string`,minLength:1,maxLength:80,description:`Short user-facing description\.`\}\},required:\[`code`\]\}\}\)/,
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_SPEC,
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolPatched = true;
+          modified = true;
+        }
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) &&
+        !content.includes('This forwards to node_repl.js') &&
+        COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_MISSING_RE.test(content)
+      ) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_MISSING_RE,
+          `$1${COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_SPEC},`,
+        );
+        computerUseNodeReplDynamicToolPatched = true;
+        modified = true;
+      }
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOLS_RETURN_RE.lastIndex = 0;
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_COMPAT_MISSING_RE.lastIndex = 0;
+
+      if (
+        !content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_RE.test(content)
+      ) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_RE,
+          `$1${COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CODE}`,
+        );
+        computerUseNodeReplDynamicToolCallPatched = true;
+        modified = true;
+      } else if (
+        !content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_RE.test(content)
+      ) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_RE,
+          `$1${COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_CODE}`,
+        );
+        computerUseNodeReplDynamicToolCallPatched = true;
+        modified = true;
+      } else if (
+        !content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_V2_RE.test(content)
+      ) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_V2_RE,
+          computerUseNodeReplDynamicToolCallCurrentV2Replacement,
+        );
+        computerUseNodeReplDynamicToolCallPatched = true;
+        modified = true;
+      } else if (COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE.test(content)) {
+        content = content.replace(
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE,
+          COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_REPLACEMENT,
+        );
+        computerUseNodeReplDynamicToolCallPatched = true;
+        modified = true;
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('Pi(`mcpServer/tool/call`')
+      ) {
+        const upgradedContent = content.replace(
+          /Pi\(`mcpServer\/tool\/call`,\{params:\{threadId:([A-Za-z_$][\w$]*),server:`node_repl`,tool:`js`,arguments:([A-Za-z_$][\w$]*)\.arguments\}\}\)/g,
+          'ln(`call-mcp-tool`,{hostId:n,threadId:$1,server:`node_repl`,tool:`js`,arguments:$2.arguments})',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('Pi(`call-mcp-tool`')
+      ) {
+        const upgradedContent = content.replace(
+          /Pi\(`call-mcp-tool`,\{params:\{hostId:([A-Za-z_$][\w$]*),threadId:([A-Za-z_$][\w$]*),server:`node_repl`,tool:`js`,arguments:([A-Za-z_$][\w$]*)\.arguments\}\}\)/g,
+          'ln(`call-mcp-tool`,{hostId:$1,threadId:$2,server:`node_repl`,tool:`js`,arguments:$3.arguments})',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('mcp__node_repl__js')
+      ) {
+        const upgradedContent = content.replace(
+          /\(\(([A-Za-z_$][\w$]*)\.namespace===`node_repl`&&([A-Za-z_$][\w$]*)===`js`\)\|\|\(\1\.namespace===`codex_app`&&\2===`mcp__node_repl__js`\)\)/,
+          '(($1.namespace===`node_repl`&&$2===`js`)||($1.namespace==null&&$2===`js`))',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      } else if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        !content.includes('namespace==null')
+      ) {
+        const upgradedContent = content.replace(
+          /if\(([A-Za-z_$][\w$]*)\.namespace===`node_repl`&&([A-Za-z_$][\w$]*)===`js`\)\{let _codexOfflineNodeReplResult,_codexOfflineNodeReplResponse;/,
+          'if(($1.namespace===`node_repl`&&$2===`js`)||($1.namespace==null&&$2===`js`)){let _codexOfflineNodeReplResult,_codexOfflineNodeReplResponse;',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        !content.includes('_codexOfflineNodeReplContentText')
+      ) {
+        const upgradedContent = content.replace(
+          /let _codexOfflineNodeReplText=Array\.isArray\(_codexOfflineNodeReplResult\?\.content\)\?_codexOfflineNodeReplResult\.content\.map\(e=>e\?\.type===`text`\?String\(e\.text\?\?``\):JSON\.stringify\(e\)\)\.join\(`\\n`\):JSON\.stringify\(_codexOfflineNodeReplResult\);/g,
+          COMPUTER_USE_NODE_REPL_RESULT_TEXT_CODE,
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        !content.includes('computer_use_node_repl_js_call')
+      ) {
+        const upgradedContent = content.replace(
+          /(_codexOfflineNodeReplText=Array\.isArray\(_codexOfflineNodeReplResult\?\.content\)\?_codexOfflineNodeReplResult\.content\.map\(e=>e\?\.type===`text`\?String\(e\.text\?\?``\):JSON\.stringify\(e\)\)\.join\(`\\n`\):JSON\.stringify\(_codexOfflineNodeReplResult\);)/,
+          match => match + 'G.info(`computer_use_node_repl_js_call`,{safe:{codePrefix:`diagnostic-upgrade-unavailable`,resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0},sensitive:{}});',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('this.logger.info(`computer_use_node_repl_js_call`')
+      ) {
+        const upgradedContent = content.replaceAll(
+          'this.logger.info(`computer_use_node_repl_js_call`',
+          'G.info(`computer_use_node_repl_js_call`',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('codePrefix:`diagnostic-upgrade-unavailable`')
+      ) {
+        const upgradedContent = content.replaceAll(
+          'safe:{codePrefix:`diagnostic-upgrade-unavailable`,resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0}',
+          'safe:{namespace:s.namespace??null,tool:l,codePrefix:String(s.arguments?.code??``).slice(0,500),hasSetupComputerUseRuntime:String(s.arguments?.code??``).includes(`setupComputerUseRuntime`),hasDirectSkyImport:String(s.arguments?.code??``).includes(`@oai/sky`),hasListApps:String(s.arguments?.code??``).includes(`list_apps`),resultPrefix:_codexOfflineNodeReplText.slice(0,500),isError:_codexOfflineNodeReplResult?.isError===!0}',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('await h(`call-mcp-tool`')
+      ) {
+        const upgradedContent = content.replaceAll(
+          'await h(`call-mcp-tool`',
+          'await ln(`call-mcp-tool`',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('await wt(`call-mcp-tool`')
+      ) {
+        const upgradedContent = content.replaceAll(
+          'await wt(`call-mcp-tool`',
+          'await ln(`call-mcp-tool`',
+        );
+        if (upgradedContent !== content) {
+          content = upgradedContent;
+          computerUseNodeReplDynamicToolCallPatched = true;
+          modified = true;
+        }
+      }
+      if (
+        content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+        content.includes('`call-mcp-tool`')
+      ) {
+        const appServerRequestFn = findAppServerRequestBusName(content);
+        if (appServerRequestFn) {
+          let upgradedContent = content.replace(
+            /await ([A-Za-z_$][\w$]*)\(`call-mcp-tool`,\{params:\{hostId:([A-Za-z_$][\w$]*),threadId:([A-Za-z_$][\w$]*),server:`node_repl`,tool:`js`,arguments:([A-Za-z_$][\w$]*)\.arguments\}\}\)/g,
+            `await ${appServerRequestFn}(\`call-mcp-tool\`,{hostId:$2,threadId:$3,server:\`node_repl\`,tool:\`js\`,arguments:$4.arguments})`,
+          );
+          upgradedContent = upgradedContent.replace(
+            /await ([A-Za-z_$][\w$]*)\(`call-mcp-tool`,\{hostId:([A-Za-z_$][\w$]*),threadId:([A-Za-z_$][\w$]*),server:`node_repl`,tool:`js`,arguments:([A-Za-z_$][\w$]*)\.arguments\}\)/g,
+            (match, requestFn, hostId, threadId, argsObject) =>
+              requestFn === appServerRequestFn
+                ? match
+                : `await ${appServerRequestFn}(\`call-mcp-tool\`,{hostId:${hostId},threadId:${threadId},server:\`node_repl\`,tool:\`js\`,arguments:${argsObject}.arguments})`,
+          );
+          if (upgradedContent !== content) {
+            content = upgradedContent;
+            computerUseNodeReplDynamicToolCallPatched = true;
+            modified = true;
+          }
+        }
+      }
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_RE.lastIndex = 0;
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_RE.lastIndex = 0;
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_V2_RE.lastIndex = 0;
+      COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE.lastIndex = 0;
+
       if (content.includes(I18N_NEEDLE)) {
         const count = content.split(I18N_NEEDLE).length - 1;
         content = content.replaceAll(I18N_NEEDLE, I18N_REPLACEMENT);
@@ -2568,6 +4180,13 @@ try {
         modified = true;
       }
       PR_ICONS_GATE_STORE_GET_RE.lastIndex = 0;
+      if (PR_ICONS_GATE_DEFAULT_VALUE_RE.test(content)) {
+        const count = content.match(PR_ICONS_GATE_DEFAULT_VALUE_RE).length;
+        content = content.replace(PR_ICONS_GATE_DEFAULT_VALUE_RE, '$1!0');
+        prIconsGateCount += count;
+        modified = true;
+      }
+      PR_ICONS_GATE_DEFAULT_VALUE_RE.lastIndex = 0;
       // IIFE-form fallback: handles (0,$f)(`2553306736`) in index / bridge chunks.
       // Uses content.includes(ID_MARKER) so it fires per-file, not guarded by a global count.
       if (content.includes(PR_ICONS_GATE_ID_MARKER)) {
@@ -3195,6 +4814,95 @@ try {
         modified = true;
       }
 
+      if (content.includes(FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER)) {
+        featureEnablementUnifiedExecAlreadyCorrect = true;
+      } else if (FEATURE_ENABLEMENT_LOCAL_STATE_RE.test(content)) {
+        featureEnablementUnifiedExecSeen = true;
+        const patchedContent = content.replace(
+          FEATURE_ENABLEMENT_LOCAL_STATE_RE,
+          (
+            _match,
+            stateVar,
+            enablementStateModuleVar,
+            stateValueVar,
+            enabledFeaturesVar,
+            filterFunctionVar,
+            mapFunctionVar,
+            loggerVar,
+          ) => {
+            const patchedStateVar = '_codexOfflineFeatureEnablements';
+            return (
+              `let ${patchedStateVar}={...${stateValueVar},unified_exec:!0}${FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER};` +
+              `if(${stateVar}&&(0,${enablementStateModuleVar}.default)(${stateVar},${patchedStateVar}))return ${stateVar};` +
+              `let ${enabledFeaturesVar}=Object.entries(${patchedStateVar}).filter(${filterFunctionVar}).map(${mapFunctionVar});` +
+            `return ${enabledFeaturesVar}.length>0&&${loggerVar}.info(\`Features enabled\`,` +
+              `{safe:{enabledFeatures:${enabledFeaturesVar}.join(\`, \`)},sensitive:{}}),${patchedStateVar}`
+            );
+          },
+        );
+        if (patchedContent !== content) {
+          content = patchedContent;
+          featureEnablementUnifiedExecPatched = true;
+          modified = true;
+        }
+      }
+
+      if (content.includes(COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER)) {
+        computerUseInputMentionAlreadyCorrect = true;
+      } else if (content.includes(COMPUTER_USE_INPUT_MENTION_PATCH_MARKER)) {
+        const patchedContent = content.replace(
+          COMPUTER_USE_INPUT_MENTION_HELPER_RE,
+          COMPUTER_USE_INPUT_MENTION_HELPER,
+        );
+        if (patchedContent === content) {
+          throw new Error(
+            'Could not locate existing Computer Use mention helper to upgrade it.',
+          );
+        }
+        content = patchedContent;
+        computerUseInputMentionPatched = true;
+        modified = true;
+      } else if (COMPUTER_USE_INPUT_MENTION_PATCHES.some(patch => content.includes(patch.needle))) {
+        computerUseInputMentionSeen = true;
+        if (!content.includes(COMPUTER_USE_INPUT_MENTION_HELPER_NEEDLE)) {
+          throw new Error(
+            'Could not locate renderer thread input builder to inject Computer Use mention helper.',
+          );
+        }
+        content = content.replace(
+          COMPUTER_USE_INPUT_MENTION_HELPER_NEEDLE,
+          COMPUTER_USE_INPUT_MENTION_HELPER + COMPUTER_USE_INPUT_MENTION_HELPER_NEEDLE,
+        );
+
+        for (const patch of COMPUTER_USE_INPUT_MENTION_PATCHES) {
+          if (!content.includes(patch.needle)) {
+            throw new Error(
+              'Could not locate all renderer prompt input builders to preserve Computer Use mentions.',
+            );
+          }
+          content = content.replace(patch.needle, patch.replacement);
+        }
+
+        computerUseInputMentionPatched = true;
+        modified = true;
+      } else if (COMPUTER_USE_INPUT_MENTION_CURRENT_TEST_RE.test(content)) {
+        computerUseInputMentionSeen = true;
+        content = COMPUTER_USE_INPUT_MENTION_HELPER + content.replace(
+          COMPUTER_USE_INPUT_MENTION_CURRENT_RE,
+          (
+            _match,
+            prefix,
+            textExpression,
+            attachmentFunction,
+            attachmentArgs,
+          ) =>
+            `${prefix}..._codexOfflineComputerUseMentionItems(${textExpression}),` +
+            `...${attachmentFunction}(${attachmentArgs})]`,
+        );
+        computerUseInputMentionPatched = true;
+        modified = true;
+      }
+
       for (const patch of AUTOMATION_DIALOG_CWD_PATCHES) {
         if (content.includes(patch.patchMarker)) {
           automationDialogCwdPatched = true;
@@ -3752,6 +5460,61 @@ try {
       );
     }
 
+    if (featureEnablementUnifiedExecPatched) {
+      log('Renderer feature enablement refresh now preserves unified_exec.');
+    } else if (featureEnablementUnifiedExecAlreadyCorrect) {
+      log('Renderer feature enablement refresh already preserves unified_exec.');
+    } else if (!featureEnablementUnifiedExecSeen) {
+      throw new Error(
+        'Could not locate renderer feature enablement list to preserve unified_exec. ' +
+        'Computer Use may miss the official JavaScript execution tool after config refresh.',
+      );
+    }
+
+    if (computerUseInputMentionPatched) {
+      log('Computer Use prompt input now includes plugin mention items.');
+    } else if (computerUseInputMentionAlreadyCorrect) {
+      log('Computer Use prompt input mention injection already patched.');
+    } else if (!computerUseInputMentionSeen) {
+      throw new Error(
+        'Could not locate renderer prompt input builders to preserve Computer Use mentions. ' +
+        'Computer Use may not receive its plugin context.',
+      );
+    } else {
+      throw new Error(
+        'Renderer prompt input builders were present, but Computer Use mention injection was not applied.',
+      );
+    }
+
+    if (computerUseNodeReplDynamicToolPatched) {
+      log('Computer Use node_repl.js dynamic tool is now exposed to thread starts.');
+    } else if (computerUseNodeReplDynamicToolAlreadyCorrect) {
+      log('Computer Use node_repl.js dynamic tool exposure already patched.');
+    } else if (!computerUseNodeReplDynamicToolSeen) {
+      throw new Error(
+        'Could not locate renderer dynamic tool list to expose node_repl.js. ' +
+        'Computer Use may still lack the official JavaScript execution tool.',
+      );
+    } else {
+      throw new Error(
+        'Renderer dynamic tool list was present, but node_repl.js exposure was not applied.',
+      );
+    }
+
+    if (computerUseNodeReplDynamicToolCallPatched) {
+      log('Computer Use node_repl.js dynamic tool calls now bridge to call-mcp-tool.');
+    } else if (computerUseNodeReplDynamicToolCallAlreadyCorrect) {
+      log('Computer Use node_repl.js dynamic tool call bridge already patched.');
+    } else if (!computerUseNodeReplDynamicToolCallSeen) {
+      throw new Error(
+        'Could not locate renderer dynamic tool dispatcher to bridge node_repl.js calls.',
+      );
+    } else {
+      throw new Error(
+        'Renderer dynamic tool dispatcher was present, but node_repl.js call bridge was not applied.',
+      );
+    }
+
     if (automationDialogCwdPatched) {
       log('Automation dialog cwd normalization patched for Windows.');
     } else {
@@ -3776,11 +5539,22 @@ try {
   // accepts the modified asar without crashing on hash mismatch.
   const exePath = path.resolve(appDir, 'Codex.exe');
   log(`Flipping asar integrity fuse in ${path.basename(exePath)}…`);
-  await flipFuses(exePath, {
-    version: FuseVersion.V1,
-    [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false,
-  });
-  log('Asar integrity fuse disabled.');
+  try {
+    await flipFuses(exePath, {
+      version: FuseVersion.V1,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false,
+    });
+    log('Asar integrity fuse disabled.');
+  } catch (error) {
+    if (!isMissingElectronFuseSentinelError(error)) {
+      throw error;
+    }
+
+    warn(
+      'Electron fuse sentinel was not found in Codex.exe; ' +
+      'skipping asar integrity fuse flip for this app version.',
+    );
+  }
 
   log('Done.');
 } finally {

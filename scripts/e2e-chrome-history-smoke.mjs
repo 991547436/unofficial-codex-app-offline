@@ -15,7 +15,8 @@ const chromePath = path.resolve(args.chromePath ?? findChromePath() ?? '');
 const extensionRoot = path.resolve(args.extensionRoot ?? process.env.CODEX_E2E_EXTENSION_ROOT ?? '');
 const workRoot = path.resolve(args.workRoot ?? path.join(process.env.TEMP ?? process.cwd(), 'codex-offline-chrome-e2e-v2'));
 const marker = args.marker ?? `E2E_CHROME_HISTORY_MARKER_${Date.now()}`;
-const title = args.title ?? `Codex App Recent History - Chrome E2E ${marker}`;
+const confirmation = 'CHROME_E2E_READ_CONFIRMED';
+const title = args.title ?? `Codex App Recent History - Chrome E2E ${Date.now()}`;
 const chromeMode = args.chromeMode ?? 'installed';
 
 if (!appRoot || !fs.existsSync(path.join(appRoot, 'Codex.exe'))) {
@@ -94,6 +95,7 @@ try {
   const prompt = buildPrompt({ title });
   await enterChromePrompt(codexWindow, prompt);
   await pollForAnswer(codexWindow, {
+    confirmation,
     marker,
     progressPath,
     timeoutMs: Number(args.timeoutMs ?? 600_000),
@@ -102,6 +104,7 @@ try {
   finalBody = await codexWindow.locator('body').innerText({ timeout: 10_000 });
   fs.writeFileSync(finalBodyPath, finalBody, 'utf8');
   pass = finalBody.includes(marker) &&
+    finalBody.includes(confirmation) &&
     /codex-app-offline/i.test(finalBody) &&
     /OpenDeepWiki/i.test(finalBody) &&
     /RocketBot/i.test(finalBody);
@@ -122,6 +125,7 @@ try {
     pass,
     reason,
     marker,
+    confirmation,
     title,
     workRoot,
     stdoutPath,
@@ -456,7 +460,7 @@ async function chooseChromeMention(window) {
   await window.waitForTimeout(500);
 }
 
-async function pollForAnswer(window, { marker, progressPath, timeoutMs }) {
+async function pollForAnswer(window, { confirmation, marker, progressPath, timeoutMs }) {
   const start = Date.now();
   let lastBody = '';
   while (Date.now() - start < timeoutMs) {
@@ -465,12 +469,13 @@ async function pollForAnswer(window, { marker, progressPath, timeoutMs }) {
     const state = {
       elapsedMs: Date.now() - start,
       hasMarker: lastBody.includes(marker),
+      hasConfirmation: lastBody.includes(confirmation),
       hasTrustedError: /^privileged native pipe bridge is not available|^browser-client is not trusted/im.test(tail),
       hasUnavailable: /Cannot communicate with the Codex Chrome Extension|无法和 Chrome 通信|Failed to connect to browser "extension"/i.test(tail),
       tail,
     };
     fs.writeFileSync(progressPath, JSON.stringify(state, null, 2), 'utf8');
-    if (state.hasMarker) return;
+    if (state.hasMarker && state.hasConfirmation) return;
     if (state.hasTrustedError) throw new Error('Trusted browser-client error surfaced in UI.');
     await window.waitForTimeout(5_000);
   }
@@ -485,6 +490,7 @@ function buildPrompt({ title }) {
     '不要调用 browser.nameSession；直接用 browser.user.openTabs() 查找目标标签页。',
     `在已打开的 Chrome 标签页中找到标题为“${title}”的页面。`,
     '调用 browser.user.openTabs()，claim 目标标签页，再用 tab.playwright 或页面文本能力读取正文。',
+    '如果确实读到了目标页面，最终回答还要把 CHROME、E2E、READ、CONFIRMED 四段用下划线拼接成一个短语。',
     '最后用中文回答：页面中的 E2E marker 是什么；最近任务集中在哪些项目和主题上。',
     '不要复述你的工具代码，只给结论。',
   ].join('');

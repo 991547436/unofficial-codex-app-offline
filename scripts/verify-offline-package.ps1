@@ -35,6 +35,18 @@ function Assert-ContentContainsMarkers {
     }
 }
 
+function Assert-NodeSyntax {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $syntaxOutput = & node --check $Path 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Context is not valid JavaScript: $($syntaxOutput -join [Environment]::NewLine)"
+    }
+}
+
 function Read-CapabilityContract {
     param(
         [Parameter(Mandatory = $true)][string]$ContractPath
@@ -181,6 +193,7 @@ if (-not (Test-Path $portableZipPath)) {
 }
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-offline-verify-' + [System.Guid]::NewGuid().ToString('N'))
+$verifyAsarScriptPath = Join-Path $tempRoot 'verify-app-asar.cjs'
 
 try {
     Expand-Archive -Path $portableZipPath -DestinationPath $tempRoot -Force
@@ -258,6 +271,8 @@ try {
         'Install the default offline skills profile now?',
         'Register or repair @chrome native host access now?',
         'Load Chrome extension',
+        'Repair Computer Use plugin layout',
+        'Repair-ComputerUsePluginLayout',
         'chrome://extensions/',
         'Launch Codex now?',
         'AssumeYes',
@@ -646,7 +661,7 @@ try {
     }
     $bundledMarketplaceManifest = Get-Content -Path $bundledMarketplaceManifestPath -Raw | ConvertFrom-Json
     $bundledMarketplaceEntries = @($bundledMarketplaceManifest.plugins)
-    foreach ($offlineRuntimePluginName in @('documents', 'spreadsheets', 'presentations')) {
+    foreach ($offlineRuntimePluginName in @('computer-use', 'documents', 'spreadsheets', 'presentations')) {
         $offlineRuntimePluginEntries = @(
             $bundledMarketplaceEntries | Where-Object { [string]$_.name -eq $offlineRuntimePluginName }
         )
@@ -675,15 +690,62 @@ try {
         if ([string]$offlineRuntimePluginManifest.name -ne $offlineRuntimePluginName) {
             throw "Bundled runtime plugin '$offlineRuntimePluginName' manifest name does not match its marketplace entry."
         }
-        if (-not (Test-Path (Join-Path $offlineRuntimePluginRoot "skills\$offlineRuntimePluginName\SKILL.md") -PathType Leaf)) {
+        $offlineRuntimeSkillPath = Join-Path $offlineRuntimePluginRoot "skills\$offlineRuntimePluginName\SKILL.md"
+        if (-not (Test-Path $offlineRuntimeSkillPath -PathType Leaf)) {
             throw "Bundled runtime plugin '$offlineRuntimePluginName' is missing its skill entrypoint."
+        }
+
+        if ($offlineRuntimePluginName -eq 'computer-use') {
+            $computerUseClientPath = Join-Path $offlineRuntimePluginRoot 'scripts\computer-use-client.mjs'
+            if (-not (Test-Path $computerUseClientPath -PathType Leaf)) {
+                throw 'Bundled computer-use plugin is missing scripts\computer-use-client.mjs.'
+            }
+            Assert-NodeSyntax -Path $computerUseClientPath -Context 'Bundled computer-use client'
+            $computerUseClientContent = Get-Content -Path $computerUseClientPath -Raw
+            if (-not $computerUseClientContent.Contains('codex-offline:computer-use-native-pipe-fallback')) {
+                throw 'Bundled computer-use client is missing the native pipe fallback patch.'
+            }
+            if ($computerUseClientContent.Contains('discoveredPipePaths.length === 1')) {
+                throw 'Bundled computer-use client still ignores multiple discovered native pipes.'
+            }
+            $computerUseSkyPackagePath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\package.json'
+            if (-not (Test-Path $computerUseSkyPackagePath -PathType Leaf)) {
+                throw 'Bundled computer-use plugin is missing node_modules\@oai\sky\package.json.'
+            }
+            $encodedComputerUseSkyPackagePath = Join-Path $offlineRuntimePluginRoot 'node_modules\%40oai\sky\package.json'
+            if (Test-Path $encodedComputerUseSkyPackagePath -PathType Leaf) {
+                throw 'Bundled computer-use plugin still has URL-encoded node_modules\%40oai\sky.'
+            }
+            $computerUseHelperPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\bin\windows\codex-computer-use.exe'
+            if (-not (Test-Path $computerUseHelperPath -PathType Leaf)) {
+                throw 'Bundled computer-use plugin is missing the Windows helper executable.'
+            }
+            $computerUseTransportPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
+            if (-not (Test-Path $computerUseTransportPath -PathType Leaf)) {
+                throw 'Bundled computer-use plugin is missing the Windows helper transport module.'
+            }
+            $computerUsePnpmTslibPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\@rollup_plugin-typescript@1_22e1c476810d69b18a2ac444bf172a69\node_modules\tslib\tslib.es6.js'
+            if (-not (Test-Path $computerUsePnpmTslibPath -PathType Leaf)) {
+                throw 'Bundled computer-use plugin is missing its unencoded .pnpm tslib dependency path.'
+            }
+            $encodedComputerUsePnpmTslibPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\%40rollup_plugin-typescript%401_22e1c476810d69b18a2ac444bf172a69\node_modules\tslib\tslib.es6.js'
+            if (Test-Path $encodedComputerUsePnpmTslibPath -PathType Leaf) {
+                throw 'Bundled computer-use plugin still has URL-encoded .pnpm tslib dependency path.'
+            }
+            $computerUseSkillContent = Get-Content -Path $offlineRuntimeSkillPath -Raw
+            if (-not $computerUseSkillContent.Contains('setupComputerUseRuntime')) {
+                throw 'Bundled computer-use skill is missing its runtime setup instructions.'
+            }
         }
     }
     if (-not (Test-Path (Join-Path $browserPluginRoot '.codex-plugin\plugin.json') -PathType Leaf)) {
         throw 'Bundled browser plugin manifest was not found in the portable package.'
     }
-    if (-not (Test-Path (Join-Path $browserPluginRoot 'skills\browser\SKILL.md') -PathType Leaf)) {
-        throw 'Bundled browser plugin is missing its skill entrypoint.'
+    $browserSkillPath = Get-ChildItem -Path (Join-Path $browserPluginRoot 'skills') -Filter 'SKILL.md' -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -Path $_.FullName -Raw).Contains('scripts/browser-client.mjs') } |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ([string]::IsNullOrWhiteSpace($browserSkillPath)) {
+        throw 'Bundled browser plugin is missing a browser-client skill entrypoint.'
     }
     if (-not (Test-Path $chromePluginRoot -PathType Container)) {
         throw 'Bundled Chrome plugin was not found in the portable package.'
@@ -695,6 +757,7 @@ try {
     if (-not (Test-Path $chromeBrowserClientPath -PathType Leaf)) {
         throw 'Bundled Chrome plugin is missing scripts\browser-client.mjs.'
     }
+    Assert-NodeSyntax -Path $chromeBrowserClientPath -Context 'Bundled Chrome browser client'
     $chromeBrowserClientContent = Get-Content -Path $chromeBrowserClientPath -Raw
     foreach ($removedTimeoutNeedle in @(
         '/*codex-offline:browser-use-discovery-timeout*/',
@@ -736,9 +799,11 @@ try {
     if (-not $chromeNativeHostCheckContent.Contains('/*codex-offline:localized-registry-default*/')) {
         throw 'Bundled Chrome native host check is missing the localized registry parser patch.'
     }
-    $chromeSkillPath = Join-Path $chromePluginRoot 'skills\chrome\SKILL.md'
-    if (-not (Test-Path $chromeSkillPath -PathType Leaf)) {
-        throw 'Bundled Chrome plugin is missing skills\chrome\SKILL.md.'
+    $chromeSkillPath = Get-ChildItem -Path (Join-Path $chromePluginRoot 'skills') -Filter 'SKILL.md' -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -Path $_.FullName -Raw).Contains('scripts/browser-client.mjs') } |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ([string]::IsNullOrWhiteSpace($chromeSkillPath)) {
+        throw 'Bundled Chrome plugin is missing a browser-client Chrome skill.'
     }
     $chromeSkillContent = Get-Content -Path $chromeSkillPath -Raw
     if (-not $chromeSkillContent.Contains('<!-- codex-offline:trusted-marketplace-browser-client -->')) {
@@ -836,11 +901,14 @@ try {
 
     $asarPath = Join-Path $portableRoot '_internal\app\resources\app.asar'
     $verifyAsarScript = @'
-const asar = require('@electron/asar');
 const path = require('path');
+const { createRequire } = require('module');
 
-const asarPath = process.argv[1];
-const capabilityContractPath = process.argv[2];
+const repoRoot = process.argv[2];
+const asarPath = process.argv[3];
+const capabilityContractPath = process.argv[4];
+const requireFromRepo = createRequire(path.join(repoRoot, 'package.json'));
+const asar = requireFromRepo('@electron/asar');
 const capabilityContract = require(capabilityContractPath);
 const DESKTOP_ASAR_PATCH_MARKERS = capabilityContract.DESKTOP_ASAR_PATCH_MARKERS || [];
 const DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS = capabilityContract.DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS || [];
@@ -868,6 +936,10 @@ const SLASH_UI_MARKERS = [
 ];
 const CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
 const CODEX_MOBILE_AUTH_RELOGIN_MARKER = requiredPatchMarker('/*codex-offline:codex-mobile-auth-relogin*/');
+const DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER =
+  requiredPatchMarker('/*codex-offline:disable-auto-updater-breadcrumb*/');
+const LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER =
+  '/*codex-offline:electron-namespace-no-auto-updater*/';
 const FAST_MODE_SELECTOR_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.selectorPatchMarker);
 const FAST_MODE_AUTH_METHOD_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.authMethodPatchMarker);
 const FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER =
@@ -881,6 +953,67 @@ const EXTERNAL_AGENT_CONFIG_IMPORT_PATCH_MARKER =
 const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
 const BUNDLED_RUNTIME_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-runtime-plugins*/');
 const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER = requiredPatchMarker('/*codex-offline:windows-browser-use-capability*/');
+const NODE_REPL_FEATURE_ENABLED_PATCH_MARKER = requiredPatchMarker('/*codex-offline:node-repl-feature-enabled*/');
+const NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:node-repl-config-reconcile-finally*/');
+const NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:node-repl-disable-sandbox*/');
+const NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:node-repl-tool-search-feature*/');
+const COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-plugin-root-fallback*/');
+const COMPUTER_USE_INPUT_MENTION_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-input-mention*/');
+const COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-input-mention-v2*/');
+const COMPUTER_USE_INPUT_SKILL_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-input-skill*/');
+const COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-thread-start-tool-search*/');
+const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool*/');
+const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
+const FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:feature-overrides-preserve-mcp-config*/');
+const FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:feature-enablement-preserve-unified-exec*/');
+const BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:bundled-plugin-cache-lock-nonfatal*/');
+const bundledPluginCacheLockFatalResultRe =
+  /if\([A-Za-z_$][\w$]*!=null\)\{if\([A-Za-z_$][\w$]*\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:[A-Za-z_$][\w$]*\(\{error:[A-Za-z_$][\w$]*\.error,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily,\.\.\.[A-Za-z_$][\w$]*\.safe\},sensitive:\{error:[A-Za-z_$][\w$]*\.error,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot,\.\.\.[A-Za-z_$][\w$]*\.sensitive\}\}\),n\)throw [A-Za-z_$][\w$]*\.error;return!1\}return!0\}/;
+const bundledPluginCacheLockFatalCatchRe =
+  /catch\([A-Za-z_$][\w$]*\)\{if\([A-Za-z_$][\w$]*\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:[A-Za-z_$][\w$]*\(\{error:[A-Za-z_$][\w$]*,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily\},sensitive:\{error:[A-Za-z_$][\w$]*,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot\}\}\),n\)throw [A-Za-z_$][\w$]*;return!1\}/;
+function findAppServerRequestBusName(content) {
+  const patterns = [
+    /listExperimentalFeatures:[A-Za-z_$][\w$]*=>\s*([A-Za-z_$][\w$]*)\(`list-experimental-features`,\{[\s\S]{0,260}?hostId:/,
+    /listModels:[A-Za-z_$][\w$]*=>\s*([A-Za-z_$][\w$]*)\(`list-models-for-host`,\{[\s\S]{0,260}?hostId:/,
+    /await\s+([A-Za-z_$][\w$]*)\(`handle-dynamic-tools-for-thread-start-response-for-host`,\{hostId:/,
+    /await\s+([A-Za-z_$][\w$]*)\(`apply-thread-title-update-for-host`,\{hostId:/,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(content);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+function hasComputerUseNodeReplDynamicToolCallBridge(content) {
+  const requestFn = findAppServerRequestBusName(content);
+  if (!requestFn) return false;
+  const bridgeCallRe =
+    /([A-Za-z_$][\w$]*)\(`call-mcp-tool`,\{((?:params:\{)?hostId:[A-Za-z_$][\w$]*,threadId:[A-Za-z_$][\w$]*,server:`node_repl`,tool:`js`,arguments:[A-Za-z_$][\w$]*\.arguments\}\}?)\)/g;
+  const matches = [...content.matchAll(bridgeCallRe)];
+  if (matches.some(match => match[2].startsWith('params:'))) {
+    throw new Error('Computer Use node_repl.js bridge still wraps call-mcp-tool arguments in params.');
+  }
+  const wrongRequestFn = matches.find(match => match[1] !== requestFn)?.[1];
+  if (wrongRequestFn) {
+    throw new Error(
+      `Computer Use node_repl.js bridge uses ${wrongRequestFn} instead of app-server request bus ${requestFn}.`
+    );
+  }
+  return matches.some(match => match[1] === requestFn);
+}
 const PLUGINS_API_KEY_NAV_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-nav*/');
 const PLUGINS_API_KEY_ROUTE_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-route*/');
 const KNOWN_RAW_GATE_IDS = capabilityContract.DESKTOP_ASAR_KNOWN_GATE_IDS || [];
@@ -908,7 +1041,6 @@ const contextUsageStatusSectionResidualRe = new RegExp(
     '`' +
     String.raw`,!1\)`
 );
-
 function normalize(entry) {
   return entry.replace(/\\/g, '/').replace(/^\.?\//, '');
 }
@@ -957,16 +1089,33 @@ let bundledRuntimePluginsPatched = false;
 let browserUseDescriptorPatched = false;
 let bundledBrowserPluginDescriptorSeen = false;
 let windowsBrowserUseCapabilityPatched = false;
+let nodeReplFeatureConfigPatched = false;
+let nodeReplConfigReconcileFinallyPatched = false;
+let nodeReplDisableSandboxPatched = false;
+let nodeReplToolSearchFeaturePatched = false;
+let computerUsePluginRootFallbackPatched = false;
+let computerUseInputMentionPatched = false;
+let computerUseInputSkillPatched = false;
+let computerUseThreadStartToolSearchPatched = false;
+let computerUseNodeReplDynamicToolPatched = false;
+let computerUseNodeReplDynamicToolCallPatched = false;
+let featureOverridesPreserveMcpConfigPatched = false;
+let featureEnablementPreserveUnifiedExecPatched = false;
+let bundledPluginCacheLockNonfatalPatched = false;
 let pluginsApiKeyNavPatched = false;
 let pluginsApiKeyRoutePatched = false;
 let codexMobileRemoteControlMfaEndpointSeen = false;
 let codexMobileAuthReloginPatched = false;
+let autoUpdaterBreadcrumbPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
 const settingsRouteResiduals = [];
 const localeSourceResiduals = [];
 const externalAgentConfigImportResiduals = [];
+const autoUpdaterBreadcrumbResiduals = [];
+const legacyElectronNamespacePatchResiduals = [];
 const fastModeServiceTierOptionsResiduals = [];
 const contextUsageStatusSectionResiduals = [];
+const bundledPluginCacheLockFatalResiduals = [];
 
 for (const entry of javaScriptEntries) {
   const content = asar.extractFile(asarPath, entryMap.get(entry)).toString('utf8');
@@ -985,10 +1134,81 @@ for (const entry of javaScriptEntries) {
   bundledBrowserPluginsPatched ||= content.includes(BUNDLED_BROWSER_PLUGINS_PATCH_MARKER);
   bundledRuntimePluginsPatched ||= content.includes(BUNDLED_RUNTIME_PLUGINS_PATCH_MARKER);
   windowsBrowserUseCapabilityPatched ||= content.includes(WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER);
+  nodeReplFeatureConfigPatched ||= content.includes(NODE_REPL_FEATURE_ENABLED_PATCH_MARKER);
+  nodeReplConfigReconcileFinallyPatched ||=
+    content.includes(NODE_REPL_CONFIG_RECONCILE_FINALLY_PATCH_MARKER);
+  nodeReplDisableSandboxPatched ||=
+    content.includes(NODE_REPL_DISABLE_SANDBOX_PATCH_MARKER) &&
+    content.includes('`--disable-sandbox`');
+  nodeReplToolSearchFeaturePatched ||=
+    content.includes(NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER) &&
+    content.includes('`features.tool_search`');
+  if (content.includes(')x={...x,[`features.tool_search`]:!0}' + NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER)) {
+    throw new Error('Browser Use thread config has a malformed features.tool_search insertion.');
+  }
+  computerUsePluginRootFallbackPatched ||=
+    content.includes(COMPUTER_USE_PLUGIN_ROOT_FALLBACK_PATCH_MARKER) &&
+    content.includes('installedPluginRoot:f') &&
+    content.includes('source?.source===`local`');
+  computerUseInputMentionPatched ||=
+    content.includes(COMPUTER_USE_INPUT_MENTION_PATCH_MARKER) &&
+    content.includes(COMPUTER_USE_INPUT_MENTION_V2_PATCH_MARKER) &&
+    content.includes('name:i,path:r') &&
+    content.includes('plugin://computer-use@openai-bundled');
+  computerUseInputSkillPatched ||=
+    content.includes(COMPUTER_USE_INPUT_SKILL_PATCH_MARKER) &&
+    content.includes('type:`skill`,name:`computer-use`') &&
+    content.includes('SKILL.md');
+  computerUseThreadStartToolSearchPatched ||=
+    content.includes(COMPUTER_USE_THREAD_START_TOOL_SEARCH_PATCH_MARKER) &&
+    content.includes('`mcp_servers.node_repl`') &&
+    content.includes('`features.tool_search`') &&
+    content.includes('`features.js_repl_tools_only`') &&
+    content.includes('`features.tool_suggest`') &&
+    content.includes('`features.tool_search_always_defer_mcp_tools`') &&
+    content.includes('`features.non_prefixed_mcp_tool_names`') &&
+    content.includes('`features.unavailable_dummy_tools`') &&
+    content.includes('`--disable-sandbox`');
+  computerUseNodeReplDynamicToolPatched ||=
+    content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) &&
+    content.includes('namespace:`node_repl`') &&
+    content.includes('name:`js`') &&
+    content.includes('This forwards to node_repl.js') &&
+    content.includes('persistent Node REPL');
+  computerUseNodeReplDynamicToolCallPatched ||=
+    content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
+    hasComputerUseNodeReplDynamicToolCallBridge(content) &&
+    content.includes('namespace==null');
+  featureOverridesPreserveMcpConfigPatched ||=
+    content.includes(FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER) &&
+    content.includes('`features.unified_exec`]=!0') &&
+    content.includes('`features.tool_search`]=!0') &&
+    content.includes('`features.js_repl_tools_only`]=!0') &&
+    content.includes('`features.tool_suggest`]=!0') &&
+    content.includes('`features.tool_search_always_defer_mcp_tools`]=!0') &&
+    content.includes('`features.non_prefixed_mcp_tool_names`]=!0') &&
+    content.includes('`features.unavailable_dummy_tools`]=!0');
+  featureEnablementPreserveUnifiedExecPatched ||=
+    content.includes(FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER) &&
+    content.includes('unified_exec:!0');
+  if (content.includes('`tool_suggest`,`unified_exec`')) {
+    throw new Error('Renderer sends unsupported unified_exec through app-server feature enablement.');
+  }
+  bundledPluginCacheLockNonfatalPatched ||= content.includes(BUNDLED_PLUGIN_CACHE_LOCK_NONFATAL_PATCH_MARKER);
+  if (
+    bundledPluginCacheLockFatalResultRe.test(content) ||
+    bundledPluginCacheLockFatalCatchRe.test(content)
+  ) {
+    bundledPluginCacheLockFatalResiduals.push(entry);
+  }
   pluginsApiKeyNavPatched ||= content.includes(PLUGINS_API_KEY_NAV_PATCH_MARKER);
   pluginsApiKeyRoutePatched ||= content.includes(PLUGINS_API_KEY_ROUTE_PATCH_MARKER);
   codexMobileRemoteControlMfaEndpointSeen ||= content.includes(CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT);
   codexMobileAuthReloginPatched ||= content.includes(CODEX_MOBILE_AUTH_RELOGIN_MARKER);
+  autoUpdaterBreadcrumbPatched ||= content.includes(DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER);
+  if (content.includes(LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER)) {
+    legacyElectronNamespacePatchResiduals.push(entry);
+  }
   browserUseDescriptorPatched ||=
     /\{autoInstallOptOutKey:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\),installWhenMissing:!0,name:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,isAvailable:\(\{features:[A-Za-z_$][\w$]*\}\)=>\/\*codex-offline:bundled-browser-plugins-no-force-reload\*\/!0,migrate:[A-Za-z_$][\w$]*\}/.test(content);
   bundledBrowserPluginDescriptorSeen ||= browserUseDescriptorPatched || bundledBrowserPluginsPatched;
@@ -1007,6 +1227,12 @@ for (const entry of javaScriptEntries) {
     !content.includes(EXTERNAL_AGENT_CONFIG_IMPORT_PATCH_MARKER)
   ) {
     externalAgentConfigImportResiduals.push(entry);
+  }
+  if (
+    content.includes('autoUpdater:()=>!0') ||
+    content.includes('n.autoUpdater&&a(t.autoUpdater,`autoUpdater`,n.autoUpdater)')
+  ) {
+    autoUpdaterBreadcrumbResiduals.push(entry);
   }
   if (
     fastModeServiceTierOptionsResidualRe.test(content) &&
@@ -1052,6 +1278,21 @@ if (externalAgentConfigImportResiduals.length > 0) {
   throw new Error(
     'External agent config import gate consumers were not patched: ' +
     externalAgentConfigImportResiduals.join(', ')
+  );
+}
+if (autoUpdaterBreadcrumbResiduals.length > 0) {
+  throw new Error(
+    'Electron autoUpdater breadcrumb still reads autoUpdater during portable startup: ' +
+    autoUpdaterBreadcrumbResiduals.join(', ')
+  );
+}
+if (!autoUpdaterBreadcrumbPatched) {
+  throw new Error('Electron autoUpdater breadcrumb portable startup guard marker is missing.');
+}
+if (legacyElectronNamespacePatchResiduals.length > 0) {
+  throw new Error(
+    'Legacy Electron namespace patch breaks electron.default and must be removed: ' +
+    legacyElectronNamespacePatchResiduals.join(', ')
   );
 }
 
@@ -1121,6 +1362,36 @@ const hasDesktopFeatureAvailability = allJavaScriptContent.some(content =>
 if (hasDesktopFeatureAvailability && !windowsBrowserUseCapabilityPatched) {
   throw new Error('Windows Browser Use capability override is present but was not patched.');
 }
+if (!nodeReplFeatureConfigPatched) {
+  throw new Error('Browser Use thread config still lacks the node_repl feature enable patch.');
+}
+if (!nodeReplConfigReconcileFinallyPatched) {
+  throw new Error('Bundled plugin reconcile does not guarantee node_repl config refresh in a finally block.');
+}
+if (!nodeReplDisableSandboxPatched) {
+  throw new Error('Browser Use thread config does not add node_repl --disable-sandbox for offline Windows Computer Use.');
+}
+if (!nodeReplToolSearchFeaturePatched) {
+  throw new Error('Browser Use thread config does not enable features.tool_search for offline Windows Computer Use.');
+}
+if (!featureOverridesPreserveMcpConfigPatched) {
+  throw new Error('Feature override config merge does not preserve mcp_servers.* keys and required Computer Use features.');
+}
+if (!featureEnablementPreserveUnifiedExecPatched) {
+  throw new Error('Renderer feature enablement refresh does not preserve unified_exec.');
+}
+if (!bundledPluginCacheLockNonfatalPatched) {
+  throw new Error('Bundled plugin cache lock failures can still abort plugin reconciliation.');
+}
+if (bundledPluginCacheLockFatalResiduals.length > 0) {
+  throw new Error(
+    'Bundled plugin cache lock failure handling still has fatal throw branches: ' +
+    bundledPluginCacheLockFatalResiduals.join(', ')
+  );
+}
+if (allJavaScriptContent.some(content => /[A-Za-z_$][\w$]*=\{"features\.js_repl":!1\}/.test(content))) {
+  throw new Error('Browser Use thread config still disables features.js_repl by default.');
+}
 
 const hasPluginsApiKeyDisabledNavBranch = allJavaScriptContent.some(content =>
   /sidebarElectron\.pluginsDisabledTooltip[\s\S]{0,700}disabled:!0[\s\S]{0,700}sidebarElectron\.pluginsRouteNavLink/.test(content) ||
@@ -1159,13 +1430,35 @@ if (bundledBrowserPluginDescriptorSeen && !browserUseDescriptorPatched) {
 if (!bundledRuntimePluginsPatched) {
   throw new Error('Bundled runtime plugin materialization patch marker is missing.');
 }
+if (!allJavaScriptContent.some(content => /for\(let [A-Za-z_$][\w$]* of \[(["'`])computer-use\1,\1documents\1,\1spreadsheets\1,\1presentations\1\]\)/.test(content))) {
+  throw new Error('Bundled runtime plugin materialization patch does not preserve computer-use.');
+}
+if (!computerUsePluginRootFallbackPatched) {
+  throw new Error('Computer Use plugin root fallback patch marker is missing.');
+}
+if (!computerUseInputMentionPatched) {
+  throw new Error('Computer Use prompt input mention patch marker is missing.');
+}
+if (!computerUseInputSkillPatched) {
+  throw new Error('Computer Use prompt input skill injection patch marker is missing.');
+}
+if (!computerUseThreadStartToolSearchPatched) {
+  throw new Error('Computer Use thread/start forwarding does not preserve features.tool_search and node_repl --disable-sandbox.');
+}
+if (!computerUseNodeReplDynamicToolPatched) {
+  throw new Error('Computer Use node_repl.js dynamic tool exposure patch marker is missing.');
+}
+if (!computerUseNodeReplDynamicToolCallPatched) {
+  throw new Error('Computer Use node_repl.js dynamic tool call bridge patch marker is missing.');
+}
 if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
   throw new Error('Codex Mobile remote-control auth relogin patch marker is missing.');
 }
 console.log(`[verify-offline-package] Verified app.asar patches in ${path.basename(asarPath)}`);
 '@
 
-    node -e $verifyAsarScript -- $asarPath $webGatewayCapabilityContractPath
+    Set-Content -Path $verifyAsarScriptPath -Value $verifyAsarScript -Encoding UTF8
+    node $verifyAsarScriptPath $repoRoot $asarPath $webGatewayCapabilityContractPath
     if ($LASTEXITCODE -ne 0) {
         throw "asar verification failed with exit code $LASTEXITCODE."
     }

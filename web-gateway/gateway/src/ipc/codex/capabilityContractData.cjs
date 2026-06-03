@@ -150,6 +150,20 @@ const DESKTOP_ASAR_KNOWN_GATE_IDS = Object.freeze([
 const DESKTOP_ASAR_PATCH_MARKERS = Object.freeze([
   "/* codex-offline:windowsStore-patch */",
   "/*codex-offline:windows-browser-use-capability*/",
+  "/*codex-offline:node-repl-feature-enabled*/",
+  "/*codex-offline:feature-overrides-preserve-mcp-config*/",
+  "/*codex-offline:feature-enablement-preserve-unified-exec*/",
+  "/*codex-offline:bundled-plugin-cache-lock-nonfatal*/",
+  "/*codex-offline:node-repl-config-reconcile-finally*/",
+  "/*codex-offline:node-repl-disable-sandbox*/",
+  "/*codex-offline:node-repl-tool-search-feature*/",
+  "/*codex-offline:computer-use-plugin-root-fallback*/",
+  "/*codex-offline:computer-use-input-mention*/",
+  "/*codex-offline:computer-use-input-mention-v2*/",
+  "/*codex-offline:computer-use-input-skill*/",
+  "/*codex-offline:computer-use-thread-start-tool-search*/",
+  "/*codex-offline:computer-use-node-repl-dynamic-tool*/",
+  "/*codex-offline:computer-use-node-repl-dynamic-tool-call*/",
   "/*codex-offline:bundled-browser-plugins-no-force-reload*/",
   "/*codex-offline:bundled-runtime-plugins*/",
   "/*codex-offline:fast-mode-selector*/",
@@ -160,6 +174,7 @@ const DESKTOP_ASAR_PATCH_MARKERS = Object.freeze([
   "/*codex-offline:plugins-api-key-route*/",
   "/*codex-offline:codex-mobile-auth-relogin*/",
   "/*codex-offline:external-agent-config-import*/",
+  "/*codex-offline:disable-auto-updater-breadcrumb*/",
 ]);
 
 const FAST_MODE_CONTRACT = Object.freeze({
