@@ -3452,18 +3452,40 @@ try {
   ];
 
   // ═══════════════════════════════════════════════════════════════════
-  // Category A/B (renderer Statsig gate bypass & config defaults) REMOVED.
-  // These are handled at runtime by scripts/desktop-patches/init.cjs which
-  // injects gate=true into IPC shared-object data at the transport layer.
-  // No regex patching of compiled renderer JavaScript is needed.
-  // ═══════════════════════════════════════════════════════════════════
-  // ═══════════════════════════════════════════════════════════════════
-  // Category A/B (renderer Statsig gate bypass & config defaults) REMOVED.
-  // Handled at runtime by scripts/desktop-patches/init.cjs via IPC interception.
+  // Locale defaults: cannot be handled at runtime because they are static
+  // string literals with no IPC/network interception surface.  Must be
+  // patched directly in the asar.
   // ═══════════════════════════════════════════════════════════════════
   const assetsDir = path.join(tmpDir, 'webview', 'assets');
   if (!fs.existsSync(assetsDir)) {
     throw new Error('webview/assets directory not found. Package structure may have changed.');
+  }
+  {
+    const webviewJsFiles = listJavaScriptFiles(assetsDir);
+    let i18nPatched = 0;
+    let localeSourcePatched = false;
+    for (const filePath of webviewJsFiles) {
+      let content = fs.readFileSync(filePath, 'utf8');
+      let changed = false;
+      if (content.includes(I18N_NEEDLE)) {
+        content = content.replaceAll(I18N_NEEDLE, I18N_REPLACEMENT);
+        changed = true;
+      }
+      if (content.includes(LOCALE_SOURCE_NEEDLE)) {
+        content = content.replaceAll(LOCALE_SOURCE_NEEDLE, LOCALE_SOURCE_REPLACEMENT);
+        localeSourcePatched = true;
+        changed = true;
+      }
+      if (changed) {
+        fs.writeFileSync(filePath, content, 'utf8');
+        i18nPatched++;
+      }
+    }
+    if (localeSourcePatched) {
+      log(`I18n locale source defaults patched in ${i18nPatched} webview files.`);
+    } else {
+      log('I18n locale source already correct (no patching needed).');
+    }
   }
   log('Renderer Statsig gates handled by init.cjs IPC interception (no asar patching).');
 
