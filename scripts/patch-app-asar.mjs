@@ -2406,8 +2406,8 @@ try {
   } else if (featureOverridesConfigNamespaceAlreadyCorrect) {
     log('Feature override config namespace preservation already patched.');
   } else {
-    throw new Error(
-      'Could not locate feature override config merge function. ' +
+    warn(
+      'Could not locate feature override config merge function (app version may have changed). ' +
       'Computer Use may lose mcp_servers.node_repl before thread startup.',
     );
   }
@@ -2465,8 +2465,8 @@ try {
   } else if (bundledPluginCacheLockNonfatalAlreadyCorrect) {
     log('Bundled plugin cache lock failure handling already patched.');
   } else {
-    throw new Error(
-      'Could not locate bundled plugin cache lock failure handling. ' +
+    warn(
+      'Could not locate bundled plugin cache lock failure handling (app version may have changed). ' +
       'A locked Chrome plugin cache can still abort Computer Use plugin installation.',
     );
   }
@@ -2485,9 +2485,9 @@ try {
           NODE_REPL_TOOL_SEARCH_FEATURE_UPGRADE_REPLACEMENT,
         );
         if (!content.includes(NODE_REPL_TOOL_SEARCH_FEATURE_PATCH_MARKER)) {
-          throw new Error(
+          warn(
             'Could not locate legacy node_repl --disable-sandbox patch to ' +
-            'upgrade with features.tool_search for Computer Use.',
+            'upgrade with features.tool_search for Computer Use (app version may have changed).',
           );
         }
       } else if (NODE_REPL_TOOL_SEARCH_FEATURE_MISSING_SEPARATOR_RE.test(content)) {
@@ -2539,9 +2539,9 @@ try {
   } else if (nodeReplDisableSandboxAlreadyCorrect) {
     log('Node REPL sandbox bypass argument already patched.');
   } else {
-    throw new Error(
+    warn(
       'Could not locate Browser Use thread config generation to add ' +
-      'node_repl --disable-sandbox for offline Windows Computer Use.',
+      'node_repl --disable-sandbox for offline Windows Computer Use (app version may have changed).',
     );
   }
 
@@ -2877,10 +2877,10 @@ try {
       '@chrome may be filtered from the runtime marketplace in this app version.',
     );
   } else {
-    throw new Error(
+    warn(
       'Bundled browser plugin descriptors are present in main bundles, but ' +
-      'no supported patch pattern matched. @chrome may be filtered from the ' +
-      'runtime marketplace in offline builds.',
+      'no supported patch pattern matched (app version may have changed). ' +
+      '@chrome may be filtered from the runtime marketplace in offline builds.',
     );
   }
 
@@ -2907,9 +2907,10 @@ try {
       'Office plugins may not be copied into the runtime marketplace.',
     );
   } else {
-    throw new Error(
+    warn(
       'Bundled runtime marketplace filter was found but no supported patch ' +
-      'pattern matched. Office plugins may be filtered from offline installs.',
+      'pattern matched (app version may have changed). ' +
+      'Office plugins may be filtered from offline installs.',
     );
   }
 
