@@ -1247,6 +1247,8 @@ for (const entry of javaScriptEntries) {
     contextUsageStatusSectionResiduals.push(entry);
   }
 
+}
+
 if (settingsRouteResiduals.length > 0) {
   throw new Error(
     'Settings deep-link route still uses unmapped section slugs: ' +
