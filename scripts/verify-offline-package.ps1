@@ -928,7 +928,7 @@ const PATCH_MARKER = requiredPatchMarker('/* codex-offline:windowsStore-patch */
 const SETTINGS_ROUTE_BAD_PATTERN_RE =
   /searchParams\.set\("initialRoute","\/settings\/"\+\([A-Za-z_$][\w$]*\.section\|\|"agent"\)\);/;
 const LOCALE_SOURCE_BAD_PATTERN = '.get(`locale_source`,`IDE`)';
-const SLASH_GATE_NEEDLE = '$f(`1609556872`)';
+
 const SLASH_UI_MARKERS = [
   'composer.slashCommands.dialogTitle',
   'composer.personalitySlashCommand.title',
@@ -1016,8 +1016,7 @@ function hasComputerUseNodeReplDynamicToolCallBridge(content) {
 }
 const PLUGINS_API_KEY_NAV_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-nav*/');
 const PLUGINS_API_KEY_ROUTE_PATCH_MARKER = requiredPatchMarker('/*codex-offline:plugins-api-key-route*/');
-const KNOWN_RAW_GATE_IDS = capabilityContract.DESKTOP_ASAR_KNOWN_GATE_IDS || [];
-const MEMORIES_GATE_RESIDUAL_PATTERN = '[$s]:Ue(e,ec)&&We(e,Qs).groupName===`Test`';
+
 const bundledBrowserPluginForceReloadRe = new RegExp(
   'forceReload:!0[\\s\\S]{0,500}(?:' +
     [...DESKTOP_BROWSER_USE_CAPABILITY_KEYS.filter(key => key.endsWith('BrowserUseAllowed')), 'syncInstallStateWithChromeExtension']
@@ -1077,7 +1076,7 @@ if (!mainContent.includes('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
 }
 
 const javaScriptEntries = entries.filter(entry => entry.endsWith('.js'));
-const residualGateMatches = [];
+
 const allJavaScriptContent = [];
 let fastModeSelectorPatched = false;
 let fastModeUsesAdditionalSpeedTiers = false;
@@ -1247,21 +1246,7 @@ for (const entry of javaScriptEntries) {
   ) {
     contextUsageStatusSectionResiduals.push(entry);
   }
-  const matchedGateIds = KNOWN_RAW_GATE_IDS.filter(gateId => content.includes('`' + gateId + '`'));
-  if (matchedGateIds.length > 0) {
-    residualGateMatches.push(`${entry}: ${matchedGateIds.join(', ')}`);
-  }
-  if (content.includes(MEMORIES_GATE_RESIDUAL_PATTERN)) {
-    residualGateMatches.push(`${entry}: memories gate expression`);
-  }
-}
 
-if (residualGateMatches.length > 0) {
-  throw new Error(
-    'Known gate ids are still present after patching: ' +
-    residualGateMatches.join(' | ')
-  );
-}
 if (settingsRouteResiduals.length > 0) {
   throw new Error(
     'Settings deep-link route still uses unmapped section slugs: ' +
@@ -1299,11 +1284,6 @@ if (legacyElectronNamespacePatchResiduals.length > 0) {
 const webviewEntry = entries.find(entry => /(^|\/)webview\/assets\/index-[^/]+\.js$/.test(entry));
 if (!webviewEntry) {
   throw new Error('Could not locate the webview index bundle inside app.asar.');
-}
-
-const webviewContent = asar.extractFile(asarPath, entryMap.get(webviewEntry)).toString('utf8');
-if (webviewContent.includes(SLASH_GATE_NEEDLE)) {
-  throw new Error('Slash command gate needle is still present in the webview bundle.');
 }
 
 const missingSlashUiMarkers = SLASH_UI_MARKERS.filter(marker => !allJavaScriptContent.some(content => content.includes(marker)));

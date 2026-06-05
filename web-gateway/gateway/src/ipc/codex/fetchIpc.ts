@@ -55,8 +55,6 @@ function createFetchIpcHandlers(deps) {
 
   function localWhamFallback(pathname) {
     switch (pathname) {
-      case "/wham/tasks/list":
-        return { items: [] };
       case "/wham/usage":
         return null;
       case "/wham/environments":
