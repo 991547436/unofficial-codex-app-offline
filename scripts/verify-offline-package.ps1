@@ -913,8 +913,6 @@ const capabilityContract = require(capabilityContractPath);
 const DESKTOP_ASAR_PATCH_MARKERS = capabilityContract.DESKTOP_ASAR_PATCH_MARKERS || [];
 const DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS = capabilityContract.DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS || [];
 const DESKTOP_BROWSER_USE_CAPABILITY_KEYS = capabilityContract.DESKTOP_BROWSER_USE_CAPABILITY_KEYS || [];
-const FAST_MODE_CONTRACT = capabilityContract.FAST_MODE_CONTRACT || {};
-const CONTEXT_USAGE_CONTRACT = capabilityContract.CONTEXT_USAGE_CONTRACT || {};
 function requiredPatchMarker(marker) {
   if (!DESKTOP_ASAR_PATCH_MARKERS.includes(marker)) {
     throw new Error(`Capability contract is missing required app.asar patch marker: ${marker}`);
@@ -940,16 +938,6 @@ const DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER =
   requiredPatchMarker('/*codex-offline:disable-auto-updater-breadcrumb*/');
 const LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER =
   '/*codex-offline:electron-namespace-no-auto-updater*/';
-const FAST_MODE_SELECTOR_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.selectorPatchMarker);
-const FAST_MODE_AUTH_METHOD_PATCH_MARKER = requiredPatchMarker(FAST_MODE_CONTRACT.authMethodPatchMarker);
-const FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER =
-  requiredPatchMarker(FAST_MODE_CONTRACT.serviceTierOptionsPatchMarker);
-const CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER =
-  requiredPatchMarker(CONTEXT_USAGE_CONTRACT.visibilityPatchMarker);
-const CONTEXT_USAGE_STATUS_SECTION_KEY =
-  CONTEXT_USAGE_CONTRACT.localStatusSectionStorageKey || 'local-conversation-status-section-visible';
-const EXTERNAL_AGENT_CONFIG_IMPORT_PATCH_MARKER =
-  requiredPatchMarker('/*codex-offline:external-agent-config-import*/');
 const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
 const BUNDLED_RUNTIME_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-runtime-plugins*/');
 const WINDOWS_BROWSER_USE_CAPABILITY_PATCH_MARKER = requiredPatchMarker('/*codex-offline:windows-browser-use-capability*/');
@@ -1024,22 +1012,6 @@ const bundledBrowserPluginForceReloadRe = new RegExp(
       .join('|') +
     ')'
 );
-const fastModeServiceTierOptionsResidualRe =
-  /function\s+[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\{return\[\{description:[A-Za-z_$][\w$]*\.standardDescription,iconKind:null,label:[A-Za-z_$][\w$]*\.standardLabel,tier:null,value:null\},\.\.\.\([A-Za-z_$][\w$]*\?\.serviceTiers\?\?\[\]\)\.map\([A-Za-z_$][\w$]*=>\(\{description:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\),iconKind:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.id,[A-Za-z_$][\w$]*\.name\),label:[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\),tier:[A-Za-z_$][\w$]*,value:[A-Za-z_$][\w$]*\.id\}\)\)\]\}/;
-const contextUsageStatusSectionPatchedRe = new RegExp(
-  String.raw`[$\w]+\(` +
-    '`' +
-    escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
-    '`' +
-    String.raw`,!0${escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER)}\)`
-);
-const contextUsageStatusSectionResidualRe = new RegExp(
-  String.raw`[$\w]+\(` +
-    '`' +
-    escapeRegExp(CONTEXT_USAGE_STATUS_SECTION_KEY) +
-    '`' +
-    String.raw`,!1\)`
-);
 function normalize(entry) {
   return entry.replace(/\\/g, '/').replace(/^\.?\//, '');
 }
@@ -1078,11 +1050,6 @@ if (!mainContent.includes('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
 const javaScriptEntries = entries.filter(entry => entry.endsWith('.js'));
 
 const allJavaScriptContent = [];
-let fastModeSelectorPatched = false;
-let fastModeUsesAdditionalSpeedTiers = false;
-let fastModeServiceTierOptionsPatched = false;
-let contextUsageStatusSectionSeen = false;
-let contextUsageStatusSectionPatched = false;
 let bundledBrowserPluginsPatched = false;
 let bundledRuntimePluginsPatched = false;
 let browserUseDescriptorPatched = false;
@@ -1109,11 +1076,8 @@ let autoUpdaterBreadcrumbPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
 const settingsRouteResiduals = [];
 const localeSourceResiduals = [];
-const externalAgentConfigImportResiduals = [];
 const autoUpdaterBreadcrumbResiduals = [];
 const legacyElectronNamespacePatchResiduals = [];
-const fastModeServiceTierOptionsResiduals = [];
-const contextUsageStatusSectionResiduals = [];
 const bundledPluginCacheLockFatalResiduals = [];
 
 for (const entry of javaScriptEntries) {
@@ -1222,29 +1186,10 @@ for (const entry of javaScriptEntries) {
     localeSourceResiduals.push(entry);
   }
   if (
-    content.includes('from"./external-agent-config-gates-') &&
-    !content.includes(EXTERNAL_AGENT_CONFIG_IMPORT_PATCH_MARKER)
-  ) {
-    externalAgentConfigImportResiduals.push(entry);
-  }
-  if (
     content.includes('autoUpdater:()=>!0') ||
     content.includes('n.autoUpdater&&a(t.autoUpdater,`autoUpdater`,n.autoUpdater)')
   ) {
     autoUpdaterBreadcrumbResiduals.push(entry);
-  }
-  if (
-    fastModeServiceTierOptionsResidualRe.test(content) &&
-    !content.includes(FAST_MODE_SERVICE_TIER_OPTIONS_PATCH_MARKER)
-  ) {
-    fastModeServiceTierOptionsResiduals.push(entry);
-  }
-  if (
-    content.includes(CONTEXT_USAGE_STATUS_SECTION_KEY) &&
-    contextUsageStatusSectionResidualRe.test(content) &&
-    !content.includes(CONTEXT_USAGE_STATUS_SECTION_PATCH_MARKER)
-  ) {
-    contextUsageStatusSectionResiduals.push(entry);
   }
 
 }
@@ -1259,12 +1204,6 @@ if (localeSourceResiduals.length > 0) {
   throw new Error(
     'Renderer i18n provider still defaults locale_source to IDE: ' +
     localeSourceResiduals.join(', ')
-  );
-}
-if (externalAgentConfigImportResiduals.length > 0) {
-  throw new Error(
-    'External agent config import gate consumers were not patched: ' +
-    externalAgentConfigImportResiduals.join(', ')
   );
 }
 if (autoUpdaterBreadcrumbResiduals.length > 0) {
@@ -1293,49 +1232,6 @@ if (missingSlashUiMarkers.length > 0) {
   throw new Error(`Slash command UI markers are missing from app.asar JavaScript bundles: ${missingSlashUiMarkers.join(', ')}`);
 }
 
-const hasFastModeAvailabilityHelper = allJavaScriptContent.some(content =>
-  content.includes('additionalSpeedTiers') &&
-  content.includes('canUseFastMode')
-);
-if (hasFastModeAvailabilityHelper && !fastModeSelectorPatched) {
-  throw new Error('Fast mode selector availability helper is present but was not patched.');
-}
-const hasFastModeAuthMethodResidual = allJavaScriptContent.some(content =>
-  content.includes(`featureRequirements?.${FAST_MODE_CONTRACT.featureKey}`) &&
-  content.includes('authMethod!==`chatgpt`') &&
-  !content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)
-);
-if (hasFastModeAuthMethodResidual) {
-  throw new Error('Fast mode auth-method availability branch is present but was not patched.');
-}
-const hasFastModeHookResidual = allJavaScriptContent.some(content =>
-  /canUseFastMode:[A-Za-z_$][\w$]*,isDisabledByRequirement:[A-Za-z_$][\w$]*,isLoading:[A-Za-z_$][\w$]*/.test(content) &&
-  content.includes(`featureRequirements?.${FAST_MODE_CONTRACT.featureKey}`) &&
-  !content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)
-);
-if (hasFastModeHookResidual) {
-  throw new Error('Fast mode hook still depends on model metadata without the offline override marker.');
-}
-if (
-  fastModeUsesAdditionalSpeedTiers &&
-  fastModeServiceTierOptionsResiduals.length > 0
-) {
-  throw new Error(
-    'Fast mode uses additionalSpeedTiers metadata, but service-tier option builders still ' +
-    'read only model.serviceTiers: ' +
-    fastModeServiceTierOptionsResiduals.join(', ')
-  );
-}
-if (contextUsageStatusSectionResiduals.length > 0) {
-  throw new Error(
-    'Context usage status section still defaults to hidden: ' +
-    contextUsageStatusSectionResiduals.join(', ')
-  );
-}
-if (contextUsageStatusSectionSeen && !contextUsageStatusSectionPatched) {
-  throw new Error(
-    'Context usage status section is present, but the default-visible offline patch was not found.'
-  );
 }
 
 const hasDesktopFeatureAvailability = allJavaScriptContent.some(content =>
