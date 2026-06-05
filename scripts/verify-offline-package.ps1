@@ -1232,8 +1232,6 @@ if (missingSlashUiMarkers.length > 0) {
   throw new Error(`Slash command UI markers are missing from app.asar JavaScript bundles: ${missingSlashUiMarkers.join(', ')}`);
 }
 
-}
-
 const hasDesktopFeatureAvailability = allJavaScriptContent.some(content =>
   DESKTOP_BROWSER_USE_AVAILABILITY_MARKERS.every(key => content.includes(key))
 );
