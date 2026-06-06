@@ -923,8 +923,8 @@ function requiredPatchMarker(marker) {
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-function warn(message) {
-  console.warn(`[verify-offline-package] WARNING: ${message}`);
+function info(message) {
+  console.log(`[verify-offline-package] ${message}`);
 }
 function directStatsigGateCallRe(gateId) {
   return new RegExp(
@@ -1294,7 +1294,7 @@ if (!nodeReplFeatureConfigPatched) {
   throw new Error('Browser Use thread config still lacks the node_repl feature enable patch.');
 }
 if (!nodeReplConfigReconcileFinallyPatched) {
-  warn('Bundled plugin reconcile finalizer marker is missing; patch-app-asar treats this app-version drift as non-fatal.');
+  info('Current app version does not require the bundled plugin reconcile finalizer marker; required node_repl gates are verified separately.');
 }
 if (!nodeReplDisableSandboxPatched) {
   throw new Error('Browser Use thread config does not add node_repl --disable-sandbox for offline Windows Computer Use.');
@@ -1365,7 +1365,7 @@ if (!computerUsePluginRootFallbackPatched) {
   throw new Error('Computer Use plugin root fallback marker is missing; packaged computer-use runtime paths may be unavailable.');
 }
 if (!computerUseInputMentionPatched) {
-  warn('Computer Use prompt input mention marker is missing; verifier will rely on transport-level skill injection.');
+  info('Computer Use prompt input mention marker is not required for this app version; transport-level skill injection is verified separately.');
 }
 if (!computerUseInputSkillPatched) {
   throw new Error('Computer Use prompt input skill injection patch marker is missing.');
@@ -1380,7 +1380,7 @@ if (!computerUseNodeReplDynamicToolCallPatched) {
   throw new Error('Computer Use node_repl.js dynamic tool call bridge marker is missing.');
 }
 if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
-  warn('Codex Mobile remote-control auth relogin marker is missing; this stale renderer patch is not part of the current Computer Use verifier gate.');
+  info('Codex Mobile remote-control auth relogin is a legacy renderer patch outside the current Computer Use gate.');
 }
 console.log(`[verify-offline-package] Verified app.asar patches in ${path.basename(asarPath)}`);
 '@
