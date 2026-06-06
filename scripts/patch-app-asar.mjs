@@ -3453,9 +3453,9 @@ try {
   ];
 
   // ═══════════════════════════════════════════════════════════════════
-  // Locale defaults: cannot be handled at runtime because they are static
-  // string literals with no IPC/network interception surface.  Must be
-  // patched directly in the asar.
+  // Locale defaults & auth-method gates: cannot be handled at runtime
+  // because they are static string literals with no IPC/network
+  // interception surface.  Must be patched directly in the asar.
   // ═══════════════════════════════════════════════════════════════════
   const assetsDir = path.join(tmpDir, 'webview', 'assets');
   if (!fs.existsSync(assetsDir)) {
@@ -3463,8 +3463,14 @@ try {
   }
   {
     const webviewJsFiles = listJavaScriptFiles(assetsDir);
-    let i18nPatched = 0;
+    let patchedCount = 0;
     let localeSourcePatched = false;
+    let fastModeAuthPatched = false;
+    let fastModeServiceTierPatched = false;
+
+    const FAST_MODE_AUTH_NEEDLE = '.authMethod===`chatgpt`';
+    const FAST_MODE_AUTH_REPLACEMENT = '!0';
+
     for (const filePath of webviewJsFiles) {
       let content = fs.readFileSync(filePath, 'utf8');
       let changed = false;
@@ -3477,15 +3483,24 @@ try {
         localeSourcePatched = true;
         changed = true;
       }
+      if (content.includes(FAST_MODE_AUTH_NEEDLE)) {
+        content = content.replaceAll(FAST_MODE_AUTH_NEEDLE, FAST_MODE_AUTH_REPLACEMENT);
+        fastModeAuthPatched = true;
+        changed = true;
+      }
       if (changed) {
         fs.writeFileSync(filePath, content, 'utf8');
-        i18nPatched++;
+        patchedCount++;
       }
     }
-    if (localeSourcePatched) {
-      log(`I18n locale source defaults patched in ${i18nPatched} webview files.`);
+    if (patchedCount > 0) {
+      log(`Webview assets patched in ${patchedCount} files` +
+        (localeSourcePatched ? ' (locale_source)' : '') +
+        (fastModeAuthPatched ? ' (fast-mode auth)' : '') +
+        (fastModeServiceTierPatched ? ' (fast-mode service-tier)' : '') +
+        '.');
     } else {
-      log('I18n locale source already correct (no patching needed).');
+      log('Webview assets already correct (no patching needed).');
     }
   }
   log('Renderer Statsig gates handled by init.cjs IPC interception (no asar patching).');
