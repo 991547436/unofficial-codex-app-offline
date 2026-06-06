@@ -3468,9 +3468,6 @@ try {
     let fastModeAuthPatched = false;
     let fastModeServiceTierPatched = false;
 
-    const FAST_MODE_AUTH_NEEDLE = '.authMethod===`chatgpt`';
-    const FAST_MODE_AUTH_REPLACEMENT = '!0';
-
     for (const filePath of webviewJsFiles) {
       let content = fs.readFileSync(filePath, 'utf8');
       let changed = false;
@@ -3483,10 +3480,33 @@ try {
         localeSourcePatched = true;
         changed = true;
       }
-      if (content.includes(FAST_MODE_AUTH_NEEDLE)) {
-        content = content.replaceAll(FAST_MODE_AUTH_NEEDLE, FAST_MODE_AUTH_REPLACEMENT);
+      if (content.includes(FAST_MODE_AUTH_METHOD_PATCH_MARKER)) {
         fastModeAuthPatched = true;
-        changed = true;
+      } else if (
+        content.includes(FAST_MODE_KEY_MARKER) &&
+        content.includes('authMethod!==`chatgpt`')
+      ) {
+        let patchedFastModeContent = content.replace(
+          FAST_MODE_AUTH_METHOD_RE,
+          (_match, _authMethodVar, disabledRequirementVar) =>
+            `return ${disabledRequirementVar}!==!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER}}`,
+        );
+        patchedFastModeContent = patchedFastModeContent.replace(
+          FAST_MODE_HOOK_AUTH_METHOD_RE,
+          (_match, _authMethodVar, disabledRequirementVar) =>
+            `if(${disabledRequirementVar}===!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER}){`,
+        );
+        patchedFastModeContent = patchedFastModeContent.replace(
+          FAST_MODE_HOOK_CAN_USE_RE,
+          (_match, _canUseVar, disabledRequirementVar, isLoadingVar) =>
+            `canUseFastMode:!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER},` +
+            `isDisabledByRequirement:${disabledRequirementVar},isLoading:${isLoadingVar}`,
+        );
+        if (patchedFastModeContent !== content) {
+          content = patchedFastModeContent;
+          fastModeAuthPatched = true;
+          changed = true;
+        }
       }
       if (changed) {
         fs.writeFileSync(filePath, content, 'utf8');
