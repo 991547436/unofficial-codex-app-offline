@@ -870,8 +870,11 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
       connecting = false;
       lastError = error;
       logger && logger.warn("[app-server] connection failed", error);
+      const pendingConnection = connectionPromise;
       rejectConnectionPromise(error);
       scheduleReconnect(error);
+      if (pendingConnection) return pendingConnection;
+      throw error;
     }
     return connectionPromise;
   }

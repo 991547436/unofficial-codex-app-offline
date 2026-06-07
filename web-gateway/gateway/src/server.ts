@@ -48,8 +48,12 @@ const DEBUG_LOGS = process.env.CODEX_WEB_DEBUG === "1" || process.env.CODEX_WEB_
 const IPC_SLOW_LOG_MS = Number(process.env.CODEX_WEB_SLOW_LOG_MS || 750);
 const LOCAL_FILE_TOKEN_TTL_MS = Math.max(1_000, Number(process.env.CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS || 5 * 60 * 1000));
 const OFFICIAL_ASSET_PATCH_QUERY = "codex-web-worked-for=1";
+const DISABLE_SERVER_PATCH_CACHE = process.env.CODEX_WEB_DISABLE_SERVER_PATCH_CACHE === "1";
+const SERVER_PATCH_CACHE_MAX_ENTRIES = 256;
 let officialBundle = null;
 let hasWarnedWorkedForPatchMiss = false;
+const officialAssetPatchCache = new Map();
+const htmlResponseCache = new Map();
 // AsyncLocalStorage 用来把当前请求的 clientId/remoteAddress 传入更深层的 IPC handler。
 const requestContext = new AsyncLocalStorage();
 // 这些 channel 必须优先定向回触发请求的浏览器，避免局域网多设备访问时互相收到审批/fetch 响应。
@@ -267,6 +271,38 @@ function sendJson(res, status, value, extraHeaders = {}) {
   );
 }
 
+function limitMapSize(map, maxEntries) {
+  while (map.size > maxEntries) {
+    const firstKey = map.keys().next().value;
+    if (firstKey === undefined) return;
+    map.delete(firstKey);
+  }
+}
+
+function fileIdentity(file) {
+  const stat = fs.statSync(file);
+  return {
+    size: stat.size,
+    mtimeMs: Math.floor(stat.mtimeMs),
+    lastModified: stat.mtime.toUTCString(),
+  };
+}
+
+function weakEtagForFile(file, identity) {
+  return `W/"${Buffer.from(`${file}:${identity.size}:${identity.mtimeMs}`).toString("base64url")}"`;
+}
+
+function requestMatchesFreshness(req, etag, lastModified) {
+  const ifNoneMatch = String(headerValue(req.headers, "if-none-match") || "");
+  if (ifNoneMatch) return ifNoneMatch.split(",").map((value) => value.trim()).includes(etag);
+  const ifModifiedSince = Date.parse(String(headerValue(req.headers, "if-modified-since") || ""));
+  return Number.isFinite(ifModifiedSince) && ifModifiedSince >= Date.parse(lastModified);
+}
+
+function sendNotModified(res, headers) {
+  send(res, 304, headers, "");
+}
+
 /** 兼容 Node 不同 headers 结构的大小写查询。 */
 function headerValue(headers, name) {
   const normalized = String(name).toLowerCase();
@@ -367,18 +403,32 @@ function officialStyleLinks() {
     .join("\n    ");
 }
 
+function cachedTextTransform(cacheKey, file, transform) {
+  if (DISABLE_SERVER_PATCH_CACHE) return transform(readText(file));
+  const identity = fileIdentity(file);
+  const fullKey = `${cacheKey}:${file}:${identity.size}:${identity.mtimeMs}`;
+  const cached = htmlResponseCache.get(fullKey);
+  if (cached) return cached;
+  const value = transform(readText(file));
+  htmlResponseCache.set(fullKey, value);
+  limitMapSize(htmlResponseCache, SERVER_PATCH_CACHE_MAX_ENTRIES);
+  return value;
+}
+
 function createWebShellIndexResponse() {
   const shell = path.join(WEB_SHELL_DIR, "index.html");
-  let html = readText(shell);
   const links = officialStyleLinks();
-  if (links) {
-    if (html.includes("<!-- codex-official-styles -->")) {
-      html = html.replace("<!-- codex-official-styles -->", links);
-    } else {
-      html = html.replace(/<\/head>/i, `${links}\n  </head>`);
+  return cachedTextTransform(`web-shell:${links}`, shell, (rawHtml) => {
+    let html = rawHtml;
+    if (links) {
+      if (html.includes("<!-- codex-official-styles -->")) {
+        html = html.replace("<!-- codex-official-styles -->", links);
+      } else {
+        html = html.replace(/<\/head>/i, `${links}\n  </head>`);
+      }
     }
-  }
-  return html;
+    return html;
+  });
 }
 
 function isPublicOfficialStyleAsset(reqPath) {
@@ -389,8 +439,12 @@ function isPublicOfficialStyleAsset(reqPath) {
 function createRendererResponse(authToken = "") {
   const located = locateOfficialIndex();
   if (!located) return null;
-  const html = readText(located.file);
-  return transformOfficialHtml(html, authToken);
+  if (authToken && !PERSIST_AUTH_TOKEN) {
+    return transformOfficialHtml(readText(located.file), authToken);
+  }
+  return cachedTextTransform(`renderer:${PERSIST_AUTH_TOKEN ? "persist" : "public"}`, located.file, (html) =>
+    transformOfficialHtml(html, authToken)
+  );
 }
 
 /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
@@ -526,6 +580,20 @@ function patchOfficialAsset(reqPath, data, authToken = "") {
   return Buffer.from(patched, "utf-8");
 }
 
+function readStaticResponseBody(file, reqPath, identity, authToken = "") {
+  if (!shouldPatchOfficialAsset(reqPath)) return fs.readFileSync(file);
+  if (DISABLE_SERVER_PATCH_CACHE) {
+    return patchOfficialAsset(reqPath, fs.readFileSync(file), authToken);
+  }
+  const cacheKey = `${reqPath}:${file}:${identity.size}:${identity.mtimeMs}:${OFFICIAL_ASSET_PATCH_QUERY}`;
+  const cached = officialAssetPatchCache.get(cacheKey);
+  if (cached) return cached;
+  const data = patchOfficialAsset(reqPath, fs.readFileSync(file), authToken);
+  officialAssetPatchCache.set(cacheKey, data);
+  limitMapSize(officialAssetPatchCache, SERVER_PATCH_CACHE_MAX_ENTRIES);
+  return data;
+}
+
 /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
 function staticFile(reqPath) {
   if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
@@ -648,9 +716,18 @@ function cacheControlForRequestPath(reqPath) {
 }
 
 /** 发送静态文件，并按路径套用合适的缓存策略。 */
-function serveFile(res, file, status = 200, reqPath = "", authToken = "") {
-  const data = patchOfficialAsset(reqPath, fs.readFileSync(file), authToken);
-  send(res, status, { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) }, data);
+function serveFile(req, res, file, status = 200, reqPath = "", authToken = "") {
+  const identity = fileIdentity(file);
+  const etag = weakEtagForFile(`${reqPath}:${OFFICIAL_ASSET_PATCH_QUERY}`, identity);
+  const headers = {
+    "content-type": mimeType(file),
+    "cache-control": cacheControlForRequestPath(reqPath),
+    etag,
+    "last-modified": identity.lastModified,
+  };
+  if (requestMatchesFreshness(req, etag, identity.lastModified)) return sendNotModified(res, headers);
+  const data = readStaticResponseBody(file, reqPath, identity, authToken);
+  send(res, status, headers, data);
 }
 
 function serveWebShellIndex(res) {
@@ -909,10 +986,15 @@ async function createGateway() {
     defaultCodexBinaryPath: officialBundle.codexBinaryPath,
   });
   let appServerStartPromise = null;
+  let startupWarmupStartedAtMs = null;
+  let startupWarmupCompletedAtMs = null;
+  let startupWarmupError = null;
 
   function ensureAppServerStarted() {
     if (!appServer || !appServer.ensureConnection) return Promise.resolve();
     if (!appServerStartPromise) {
+      startupWarmupStartedAtMs ||= Date.now();
+      startupWarmupError = null;
       appServerStartPromise = appServer
         .ensureConnection()
         .then(() =>
@@ -922,12 +1004,23 @@ async function createGateway() {
               ? appServer.warmCache()
               : null
         )
+        .then((value) => {
+          startupWarmupCompletedAtMs = Date.now();
+          return value;
+        })
         .catch((error) => {
           appServerStartPromise = null;
+          startupWarmupError = error instanceof Error ? error.message : String(error);
           throw error;
         });
     }
     return appServerStartPromise;
+  }
+
+  function warmAppServerInBackground() {
+    ensureAppServerStarted().catch((error) => {
+      console.warn("[gateway] background app-server warmup failed", error);
+    });
   }
 
   /** 补齐 IPC handler 需要的上下文和 Electron 能力适配函数。 */
@@ -972,7 +1065,7 @@ async function createGateway() {
 
     if (isPublicOfficialStyleAsset(pathname)) {
       const file = staticFile(pathname);
-      if (file && exists(file)) return serveFile(res, file, 200, pathname);
+      if (file && exists(file)) return serveFile(req, res, file, 200, pathname);
     }
 
     if (isAppShellRoute(req, pathname)) {
@@ -984,7 +1077,6 @@ async function createGateway() {
 
     if (pathname === "/codex-web-config.js") {
       // 这个配置必须 no-store，因为模型缓存、workspaceRoots、app-server 状态都可能变化。
-      await ensureAppServerStarted();
       const gatewayConfig = buildGatewayConfig();
       const requestAuth = authResultForRequest(req, url);
       return send(
@@ -1033,6 +1125,12 @@ async function createGateway() {
       return sendJson(res, 200, {
         ok: true,
         appServer: appServer.getHealth(),
+        officialBundleReady: !!officialBundle,
+        startupWarmup: {
+          startedAtMs: startupWarmupStartedAtMs,
+          completedAtMs: startupWarmupCompletedAtMs,
+          error: startupWarmupError,
+        },
         workspaceRoots: process.env.CODEX_WEB_WORKSPACE_ROOTS ? process.env.CODEX_WEB_WORKSPACE_ROOTS.split(",").filter(Boolean) : [],
       });
     }
@@ -1195,7 +1293,6 @@ async function createGateway() {
     }
 
     if (pathname === "/official-index.patched.html") {
-      await ensureAppServerStarted();
       const html = createRendererResponse(authTokenFromRequest(req, url));
       if (!html) {
         return send(res, 404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }, "Official renderer bundle is not available yet.");
@@ -1204,7 +1301,7 @@ async function createGateway() {
     }
 
     const file = staticFile(pathname);
-    if (file && exists(file)) return serveFile(res, file, 200, pathname, authTokenFromRequest(req, url));
+    if (file && exists(file)) return serveFile(req, res, file, 200, pathname, authTokenFromRequest(req, url));
 
     if (isAppShellRoute(req, pathname)) {
       // 所有无扩展名前端路由都走同一个 bootstrap，让官方 router 接管 /local、/remote 等路径。
@@ -1239,6 +1336,7 @@ async function createGateway() {
   server.listen(PORT, HOST, () => {
     console.log(`[gateway] listening on http://${HOST}:${PORT}`);
     console.log(`[gateway] health: http://${HOST}:${PORT}/api/health`);
+    warmAppServerInBackground();
   });
 
   let shuttingDown = false;
