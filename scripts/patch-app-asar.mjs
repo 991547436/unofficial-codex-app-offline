@@ -3488,6 +3488,12 @@ try {
     /if\(([A-Za-z_$][\w$]*)\?\.authMethod!==`chatgpt`\|\|([A-Za-z_$][\w$]*)\)\{/g;
   const FAST_MODE_HOOK_CAN_USE_RE =
     /canUseFastMode:([A-Za-z_$][\w$]*),isDisabledByRequirement:([A-Za-z_$][\w$]*),isLoading:([A-Za-z_$][\w$]*)/g;
+  // v26.608+: fast mode availability is gated on ChatGPT auth AND a backend API response
+  // (featureRequirements.fast_mode). API-key users are always excluded. Patch the
+  // isServiceTierAllowed computation to remove the chatgpt-auth requirement and treat a
+  // null backend response as "allowed" (same intent as the old canUseFastMode:!0 patch).
+  const FAST_MODE_SERVICE_TIER_ALLOWED_RE =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)&&!([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)!=null&&\4\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1(?=,)/;
   const FAST_MODE_SERVICE_TIER_GET_RE =
     /function\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{return \3==null\?null:\3===`fast`\?([A-Za-z_$][\w$]*)\(\2\):\2\?\.serviceTiers\?\.find\(([A-Za-z_$][\w$]*)=>\5\.id===\3\)\?\?null\}/;
   const FAST_MODE_SERVICE_TIER_OPTIONS_RE =
@@ -3645,6 +3651,21 @@ try {
         );
         if (patchedFastModeContent !== content) {
           content = patchedFastModeContent;
+          fastModeAuthPatched = true;
+          changed = true;
+        }
+      } else if (
+        content.includes(FAST_MODE_KEY_MARKER) &&
+        FAST_MODE_SERVICE_TIER_ALLOWED_RE.test(content)
+      ) {
+        // v26.608+: patch isServiceTierAllowed to not require chatgpt auth or a non-null
+        // backend response — allows API-key users to see and use the Fast mode selector.
+        const patched = content.replace(
+          FAST_MODE_SERVICE_TIER_ALLOWED_RE,
+          `$1=!$3&&($4==null||$4?.requirements?.featureRequirements?.fast_mode!==!1)${FAST_MODE_AUTH_METHOD_PATCH_MARKER}`,
+        );
+        if (patched !== content) {
+          content = patched;
           fastModeAuthPatched = true;
           changed = true;
         }
