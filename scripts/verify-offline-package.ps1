@@ -708,27 +708,28 @@ try {
             if ($computerUseClientContent.Contains('discoveredPipePaths.length === 1')) {
                 throw 'Bundled computer-use client still ignores multiple discovered native pipes.'
             }
-            $computerUseSkyPackagePath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\package.json'
+            $cuaNodeBinRoot = Join-Path $portableRoot '_internal\app\resources\cua_node\bin'
+            $computerUseSkyPackagePath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\package.json'
             if (-not (Test-Path $computerUseSkyPackagePath -PathType Leaf)) {
-                throw 'Bundled computer-use plugin is missing node_modules\@oai\sky\package.json.'
+                throw 'Bundled computer-use plugin is missing cua_node\bin\node_modules\@oai\sky\package.json.'
             }
-            $encodedComputerUseSkyPackagePath = Join-Path $offlineRuntimePluginRoot 'node_modules\%40oai\sky\package.json'
+            $encodedComputerUseSkyPackagePath = Join-Path $cuaNodeBinRoot 'node_modules\%40oai\sky\package.json'
             if (Test-Path $encodedComputerUseSkyPackagePath -PathType Leaf) {
-                throw 'Bundled computer-use plugin still has URL-encoded node_modules\%40oai\sky.'
+                throw 'Bundled computer-use plugin still has URL-encoded cua_node\bin\node_modules\%40oai\sky.'
             }
-            $computerUseHelperPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\bin\windows\codex-computer-use.exe'
+            $computerUseHelperPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\bin\windows\codex-computer-use.exe'
             if (-not (Test-Path $computerUseHelperPath -PathType Leaf)) {
                 throw 'Bundled computer-use plugin is missing the Windows helper executable.'
             }
-            $computerUseTransportPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
+            $computerUseTransportPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
             if (-not (Test-Path $computerUseTransportPath -PathType Leaf)) {
                 throw 'Bundled computer-use plugin is missing the Windows helper transport module.'
             }
-            $computerUsePnpmTslibPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\@rollup_plugin-typescript@1_22e1c476810d69b18a2ac444bf172a69\node_modules\tslib\tslib.es6.js'
+            $computerUsePnpmTslibPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\@rollup_plugin-typescript@12.1.2_rollup@4.35.0_tslib@2.8.1_typescript@5.7.3\node_modules\tslib\tslib.es6.js'
             if (-not (Test-Path $computerUsePnpmTslibPath -PathType Leaf)) {
                 throw 'Bundled computer-use plugin is missing its unencoded .pnpm tslib dependency path.'
             }
-            $encodedComputerUsePnpmTslibPath = Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\%40rollup_plugin-typescript%401_22e1c476810d69b18a2ac444bf172a69\node_modules\tslib\tslib.es6.js'
+            $encodedComputerUsePnpmTslibPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\%40rollup_plugin-typescript%4012.1.2_rollup%404.35.0_tslib%402.8.1_typescript%405.7.3\node_modules\tslib\tslib.es6.js'
             if (Test-Path $encodedComputerUsePnpmTslibPath -PathType Leaf) {
                 throw 'Bundled computer-use plugin still has URL-encoded .pnpm tslib dependency path.'
             }

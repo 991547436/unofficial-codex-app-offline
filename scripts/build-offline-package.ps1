@@ -758,6 +758,10 @@ $encodedScopeRepairs = Repair-EncodedScopedNodeModules -RootPath (Join-Path $int
 if (@($encodedScopeRepairs).Count -gt 0) {
     Write-BuildTrace "Repaired encoded scoped node_modules directories ($(@($encodedScopeRepairs).Count))."
 }
+$encodedCuaNodeRepairs = Repair-EncodedScopedNodeModules -RootPath (Join-Path $internalRoot 'app/resources/cua_node')
+if (@($encodedCuaNodeRepairs).Count -gt 0) {
+    Write-BuildTrace "Repaired encoded scoped node_modules in cua_node ($(@($encodedCuaNodeRepairs).Count))."
+}
 $computerUseClientRepairs = Repair-ComputerUseClientNativePipeFallback -RootPath (Join-Path $internalRoot 'app/resources/plugins/openai-bundled/plugins/computer-use')
 if (@($computerUseClientRepairs).Count -gt 0) {
     Write-BuildTrace "Repaired Computer Use native pipe fallback ($(@($computerUseClientRepairs).Count))."
