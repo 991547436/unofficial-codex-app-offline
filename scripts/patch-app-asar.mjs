@@ -201,7 +201,13 @@ function log(msg) {
   console.log(`[patch-app-asar] ${msg}`);
 }
 
+// Optional patch misses are collected as well as printed so the end-of-run
+// summary makes version drift visible: an optional needle failing today often
+// foreshadows a required one failing on the next upstream bundle.
+const optionalPatchWarnings = [];
+
 function warn(msg) {
+  optionalPatchWarnings.push(msg);
   console.warn(`[patch-app-asar] WARNING: ${msg}`);
 }
 
@@ -235,6 +241,27 @@ function assertRequiredPatchesApplied() {
     'crash-or-broken package:\n' +
     requiredPatchFailures.map((m) => `  - ${m}`).join('\n'),
   );
+}
+
+// Print a drift summary so CI surfaces how many patches missed this run, even
+// when the build is allowed to proceed.
+function logPatchDriftSummary() {
+  const required = requiredPatchFailures.length;
+  const optional = optionalPatchWarnings.length;
+  if (required === 0 && optional === 0) {
+    log('Patch drift summary: all patches applied or already correct.');
+    return;
+  }
+  log(
+    `Patch drift summary: ${required} required miss(es), ${optional} optional miss(es). ` +
+    'Optional misses degrade peripheral features but do not block the build:',
+  );
+  for (const m of optionalPatchWarnings) {
+    log(`  - [optional] ${m}`);
+  }
+  for (const m of requiredPatchFailures) {
+    log(`  - [required] ${m}`);
+  }
 }
 
 /** Return the main-process entry file listed in an asar's package.json. */
@@ -3789,8 +3816,10 @@ try {
   }
   log('Renderer Statsig gates handled by init.cjs IPC interception (no asar patching).');
 
-  // Fail the build before repacking if any required patch did not apply, so an
-  // upstream bundle restructure is caught here instead of by users at launch.
+  // Surface drift first (so optional misses are always visible), then fail the
+  // build before repacking if any required patch did not apply, so an upstream
+  // bundle restructure is caught here instead of by users at launch.
+  logPatchDriftSummary();
   assertRequiredPatchesApplied();
 
   // Repack.
