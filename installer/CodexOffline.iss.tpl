@@ -38,8 +38,8 @@ Type: files; Name: "{app}\Repair Chrome Host.vbs"
 Type: files; Name: "{app}\Repair Chrome Host.cmd"
 
 [Icons]
-Name: "{group}\Codex"; Filename: "{app}\_internal\app\Codex.exe"; WorkingDir: "{app}\_internal\app"; IconFilename: "{app}\_internal\app\Codex.exe"
-Name: "{autodesktop}\Codex"; Filename: "{app}\_internal\app\Codex.exe"; WorkingDir: "{app}\_internal\app"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{group}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{autodesktop}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\Codex.exe"
 Name: "{group}\Setup Codex"; Filename: "{app}\Setup Codex.cmd"; IconFilename: "{app}\_internal\app\Codex.exe"
 
 [Run]

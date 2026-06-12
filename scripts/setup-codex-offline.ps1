@@ -209,11 +209,29 @@ function getComputerUsePipePath() {
   throw new Error("Computer Use native pipe path is unavailable");
 }
 '@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newFunctionEnvLine = '    getComputerUsePrivilegedNodeRepl()?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;'
+        if (-not $content.Contains($oldFunction)) {
+            $oldFunction = (@'
+function getComputerUsePipePath() {
+  const nativePipeDirectory =
+    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+  if (typeof nativePipeDirectory === "string") {
+    const trimmed = nativePipeDirectory.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  throw new Error("Computer Use native pipe path is unavailable");
+}
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+            $newFunctionEnvLine = '    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;'
+        }
         $newFunction = (@'
 function getComputerUsePipePaths() {
   const paths = [];
   const nativePipeDirectory =
-    getComputerUsePrivilegedNodeRepl()?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+__NATIVE_PIPE_ENV_LINE__
   if (typeof nativePipeDirectory === "string") {
     const trimmed = nativePipeDirectory.trim();
     if (trimmed) {
@@ -244,6 +262,7 @@ function discoverComputerUsePipePaths() {
   }
 }
 '@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newFunction = $newFunction.Replace('__NATIVE_PIPE_ENV_LINE__', $newFunctionEnvLine)
 
         if (
             -not $content.Contains($oldImport) -or
@@ -387,7 +406,12 @@ Write-Host $dailyLauncherMessage
 Write-Host 'After this first setup, open Codex.cmd directly.'
 
 if (-not $NoLaunch -and (Read-SetupYesNo -Prompt 'Launch Codex now?' -DefaultYes $true)) {
-    Start-Process -FilePath $appLauncher -WorkingDirectory (Split-Path $appLauncher -Parent)
+    if (Test-Path -LiteralPath $dailyLauncher -PathType Leaf) {
+        Start-Process -FilePath $dailyLauncher -WorkingDirectory $packageRoot
+    }
+    else {
+        Start-Process -FilePath $appLauncher -WorkingDirectory (Split-Path $appLauncher -Parent)
+    }
 }
 elseif ($NoLaunch) {
     Write-Host 'Launch skipped by -NoLaunch.' -ForegroundColor Yellow

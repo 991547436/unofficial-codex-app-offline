@@ -13,7 +13,10 @@
  *    for telemetry and build-type reporting.  We inject it at the top of the
  *    main-process entry point.  The same bootstrap patch also defaults the
  *    Windows Computer Use process environment gate so direct Codex.exe
- *    launches get the same runtime features as the provided launchers.
+ *    launches get the same runtime features as the provided launchers, and
+ *    stubs the electron_browser_msix_updater native binding so that reading
+ *    electron.autoUpdater (which windowsStore=true routes to the MSIX updater)
+ *    does not abort standalone startup with "No such binding was linked".
  *
  * 2. Implement "show-settings" and "open-config-toml" IPC handlers
  *    The Electron build throws "not implemented" for these messages.  We
@@ -224,6 +227,32 @@ const COMPUTER_USE_ENV_DEFAULT =
   'if(process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE==null){' +
     'process.env.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE="1"' +
   '}\n';
+// Neutralize the MSIX auto-updater native binding for portable launches.
+// process.windowsStore=true makes Electron route electron.autoUpdater through
+// the MSIX updater (lib/browser/api/auto-updater/auto-updater-msix.ts), whose
+// module load calls process._linkedBinding("electron_browser_msix_updater").
+// That binding is only linked inside a real MSIX container, so a standalone
+// Codex.exe aborts at bootstrap with "No such binding was linked". Newer builds
+// (>= 26.609) read electron.autoUpdater during startup via a __toESM namespace
+// copy that the Sentry-breadcrumb needle patch does not cover, so we stub the
+// binding itself: any electron_browser_msix_updater lookup returns a chainable
+// no-op so the updater module loads (and stays inert) instead of crashing.
+const MSIX_UPDATER_BINDING_STUB =
+  '(function(){try{' +
+    'if(process._codexOfflineMsixStub)return;' +
+    'process._codexOfflineMsixStub=true;' +
+    'var _lb=process._linkedBinding;' +
+    'if(typeof _lb!=="function")return;' +
+    'var _stub=new Proxy(function(){return _stub},{' +
+      'get:function(_t,_p){return _p==="then"?undefined:_stub},' +
+      'apply:function(){return _stub},' +
+      'construct:function(){return _stub}' +
+    '});' +
+    'process._linkedBinding=function(_n){' +
+      'if(_n==="electron_browser_msix_updater")return _stub;' +
+      'return _lb.apply(this,arguments)' +
+    '}' +
+  '}catch(_e){}})();\n';
 // Suppress EPIPE errors on stdout/stderr that surface as uncaught
 // exceptions when the Electron app writes to a console pipe that has
 // already been closed (e.g. the CMD window that launched Codex exits
@@ -252,7 +281,7 @@ const PATCH_BOOTSTRAP_REQUIRE =
     '}' +
   '}catch(_codexOfflineE){}' +
   '\n';
-const PATCH_SNIPPET = `${PATCH_MARKER}\nif(!process.windowsStore){process.windowsStore=true;}\n${COMPUTER_USE_ENV_DEFAULT}${EPIPE_GUARD}${PATCH_BOOTSTRAP_REQUIRE}`;
+const PATCH_SNIPPET = `${PATCH_MARKER}\nif(!process.windowsStore){process.windowsStore=true;}\n${MSIX_UPDATER_BINDING_STUB}${COMPUTER_USE_ENV_DEFAULT}${EPIPE_GUARD}${PATCH_BOOTSTRAP_REQUIRE}`;
 
 /** Return true if the file already contains our patch marker. */
 function isAlreadyPatched(filePath) {
@@ -277,6 +306,18 @@ function refreshMainEntryPatch(filePath) {
       content = content.replace(windowsStoreLine, windowsStoreLine + COMPUTER_USE_ENV_DEFAULT);
     } else {
       content = content.replace(PATCH_MARKER, `${PATCH_MARKER}\n${COMPUTER_USE_ENV_DEFAULT}`);
+    }
+    changed = true;
+  }
+
+  // Add the MSIX auto-updater binding stub if missing from a prior build.
+  // Required for >= 26.609 portable startup (see MSIX_UPDATER_BINDING_STUB).
+  if (!content.includes('_codexOfflineMsixStub')) {
+    const windowsStoreLine = 'if(!process.windowsStore){process.windowsStore=true;}\n';
+    if (content.includes(windowsStoreLine)) {
+      content = content.replace(windowsStoreLine, windowsStoreLine + MSIX_UPDATER_BINDING_STUB);
+    } else {
+      content = content.replace(PATCH_MARKER, `${PATCH_MARKER}\n${MSIX_UPDATER_BINDING_STUB}`);
     }
     changed = true;
   }

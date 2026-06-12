@@ -2,7 +2,8 @@
 param(
     [string]$BuildMetadataPath = 'build-metadata.json',
     [string]$ConfigPath = 'config/offline-package.json',
-    [switch]$RequireInstallerAsset
+    [switch]$RequireInstallerAsset,
+    [switch]$SkipDesktopLaunchSmoke
 )
 
 Set-StrictMode -Version Latest
@@ -116,6 +117,20 @@ $metadata = Get-Content -Path $buildMetadataFile -Raw | ConvertFrom-Json
 $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
 $artifactRoot = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $metadata.artifactDirectory
 
+$installerTemplatePath = Join-Path $repoRoot 'installer\CodexOffline.iss.tpl'
+if (-not (Test-Path $installerTemplatePath)) {
+    throw "Installer template was not found: $installerTemplatePath"
+}
+$installerTemplateContent = Get-Content -Path $installerTemplatePath -Raw
+foreach ($needle in @(
+    'Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"',
+    'IconFilename: "{app}\_internal\app\Codex.exe"'
+)) {
+    if (-not $installerTemplateContent.Contains($needle)) {
+        throw "Installer template is missing expected launcher marker: $needle"
+    }
+}
+
 if (-not (Test-Path $artifactRoot)) {
     throw "Artifact directory was not found: $artifactRoot"
 }
@@ -194,6 +209,11 @@ if (-not (Test-Path $portableZipPath)) {
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-offline-verify-' + [System.Guid]::NewGuid().ToString('N'))
 $verifyAsarScriptPath = Join-Path $tempRoot 'verify-app-asar.cjs'
+$directLaunchSmokeScriptPath = Join-Path $repoRoot 'scripts\offline-direct-launch-smoke.mjs'
+
+if (-not (Test-Path $directLaunchSmokeScriptPath)) {
+    throw "Desktop direct-launch smoke script was not found: $directLaunchSmokeScriptPath"
+}
 
 try {
     Expand-Archive -Path $portableZipPath -DestinationPath $tempRoot -Force
@@ -226,7 +246,9 @@ try {
         '_internal\tools\Sync All Skills.cmd',
         '_internal\tools\Repair Chrome Host.cmd',
         '_internal\app\Codex.exe',
-        '_internal\app\resources\app.asar'
+        '_internal\app\resources\app.asar',
+        '_internal\patches\init.cjs',
+        '_internal\app\patches\init.cjs'
     )
 
     foreach ($relativePath in $requiredPortableFiles) {
@@ -280,6 +302,7 @@ try {
         'repair-chrome-host.ps1',
         'bootstrap-codex-skills.ps1',
         'Codex.cmd',
+        'Start-Process -FilePath $dailyLauncher',
         'After this first setup, open Codex.cmd directly.'
     )) {
         if (-not $setupContent.Contains($needle)) {
@@ -289,9 +312,17 @@ try {
 
     $dailyLauncherPath = Join-Path $portableRoot 'Codex.cmd'
     $dailyLauncherContent = Get-Content -Path $dailyLauncherPath -Raw
-    foreach ($needle in @('%~dp0_internal\app\Codex.exe', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+    foreach ($needle in @('%~dp0_internal\app\Codex.exe', '/D "%~dp0_internal\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
         if (-not $dailyLauncherContent.Contains($needle)) {
             throw "Daily launcher is missing expected relative-launch marker: $needle"
+        }
+    }
+
+    $directLauncherPath = Join-Path $portableRoot '_internal\tools\Launch Codex Direct.cmd'
+    $directLauncherContent = Get-Content -Path $directLauncherPath -Raw
+    foreach ($needle in @('%~dp0..\app\Codex.exe', '/D "%~dp0..\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+        if (-not $directLauncherContent.Contains($needle)) {
+            throw "Direct launcher is missing expected app-working-directory marker: $needle"
         }
     }
 
@@ -708,29 +739,43 @@ try {
             if ($computerUseClientContent.Contains('discoveredPipePaths.length === 1')) {
                 throw 'Bundled computer-use client still ignores multiple discovered native pipes.'
             }
-            $cuaNodeBinRoot = Join-Path $portableRoot '_internal\app\resources\cua_node\bin'
-            $computerUseSkyPackagePath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\package.json'
-            if (-not (Test-Path $computerUseSkyPackagePath -PathType Leaf)) {
-                throw 'Bundled computer-use plugin is missing cua_node\bin\node_modules\@oai\sky\package.json.'
+            $computerUseSkyRootCandidates = @(
+                (Join-Path $offlineRuntimePluginRoot 'node_modules\@oai\sky'),
+                (Join-Path $portableRoot '_internal\app\resources\cua_node\bin\node_modules\@oai\sky')
+            )
+            $computerUseSkyRoot = @(
+                $computerUseSkyRootCandidates | Where-Object {
+                    Test-Path (Join-Path $_ 'package.json') -PathType Leaf
+                }
+            ) | Select-Object -First 1
+            if ($null -eq $computerUseSkyRoot) {
+                throw 'Bundled computer-use plugin is missing node_modules\@oai\sky\package.json.'
             }
-            $encodedComputerUseSkyPackagePath = Join-Path $cuaNodeBinRoot 'node_modules\%40oai\sky\package.json'
+            $computerUseNodeModulesRoot = Split-Path -Parent (Split-Path -Parent $computerUseSkyRoot)
+            $encodedComputerUseSkyPackagePath = Join-Path $computerUseNodeModulesRoot '%40oai\sky\package.json'
             if (Test-Path $encodedComputerUseSkyPackagePath -PathType Leaf) {
-                throw 'Bundled computer-use plugin still has URL-encoded cua_node\bin\node_modules\%40oai\sky.'
+                throw 'Bundled computer-use plugin still has URL-encoded node_modules\%40oai\sky.'
             }
-            $computerUseHelperPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\bin\windows\codex-computer-use.exe'
+            $computerUseHelperPath = Join-Path $computerUseSkyRoot 'bin\windows\codex-computer-use.exe'
             if (-not (Test-Path $computerUseHelperPath -PathType Leaf)) {
                 throw 'Bundled computer-use plugin is missing the Windows helper executable.'
             }
-            $computerUseTransportPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
+            $computerUseTransportPath = Join-Path $computerUseSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
             if (-not (Test-Path $computerUseTransportPath -PathType Leaf)) {
                 throw 'Bundled computer-use plugin is missing the Windows helper transport module.'
             }
-            $computerUsePnpmTslibPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\@rollup_plugin-typescript@12.1.2_rollup@4.35.0_tslib@2.8.1_typescript@5.7.3\node_modules\tslib\tslib.es6.js'
-            if (-not (Test-Path $computerUsePnpmTslibPath -PathType Leaf)) {
+            $computerUsePnpmRoot = Join-Path $computerUseSkyRoot 'dist\node_modules\.pnpm'
+            $computerUsePnpmTslibPaths = @(
+                Get-ChildItem -LiteralPath $computerUsePnpmRoot -Recurse -Filter 'tslib.es6.js' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -like '*\node_modules\tslib\tslib.es6.js' }
+            )
+            if ($computerUsePnpmTslibPaths.Count -eq 0) {
                 throw 'Bundled computer-use plugin is missing its unencoded .pnpm tslib dependency path.'
             }
-            $encodedComputerUsePnpmTslibPath = Join-Path $cuaNodeBinRoot 'node_modules\@oai\sky\dist\node_modules\.pnpm\%40rollup_plugin-typescript%4012.1.2_rollup%404.35.0_tslib%402.8.1_typescript%405.7.3\node_modules\tslib\tslib.es6.js'
-            if (Test-Path $encodedComputerUsePnpmTslibPath -PathType Leaf) {
+            $encodedComputerUsePnpmTslibPaths = @(
+                $computerUsePnpmTslibPaths | Where-Object { $_.FullName -like '*%40rollup_plugin-typescript%40*' }
+            )
+            if ($encodedComputerUsePnpmTslibPaths.Count -gt 0) {
                 throw 'Bundled computer-use plugin still has URL-encoded .pnpm tslib dependency path.'
             }
             $computerUseSkillContent = Get-Content -Path $offlineRuntimeSkillPath -Raw
@@ -1390,6 +1435,17 @@ console.log(`[verify-offline-package] Verified app.asar patches in ${path.basena
     node $verifyAsarScriptPath $repoRoot $asarPath $webGatewayCapabilityContractPath
     if ($LASTEXITCODE -ne 0) {
         throw "asar verification failed with exit code $LASTEXITCODE."
+    }
+
+    if (-not $SkipDesktopLaunchSmoke) {
+        $directLaunchSmokeWorkRoot = Join-Path $tempRoot 'direct-launch-smoke'
+        node $directLaunchSmokeScriptPath `
+            --portable-root $portableRoot `
+            --work-root $directLaunchSmokeWorkRoot `
+            --timeout-ms 30000
+        if ($LASTEXITCODE -ne 0) {
+            throw "Desktop direct-launch offline smoke failed with exit code $LASTEXITCODE."
+        }
     }
 }
 finally {

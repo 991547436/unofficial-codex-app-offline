@@ -592,11 +592,29 @@ function getComputerUsePipePath() {
   throw new Error("Computer Use native pipe path is unavailable");
 }
 '@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newFunctionEnvLine = '    getComputerUsePrivilegedNodeRepl()?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;'
+        if (-not $content.Contains($oldFunction)) {
+            $oldFunction = (@'
+function getComputerUsePipePath() {
+  const nativePipeDirectory =
+    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+  if (typeof nativePipeDirectory === "string") {
+    const trimmed = nativePipeDirectory.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  throw new Error("Computer Use native pipe path is unavailable");
+}
+'@).Replace("`r`n", "`n").Trim("`r", "`n")
+            $newFunctionEnvLine = '    globalThis.nodeRepl?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;'
+        }
         $newFunction = (@'
 function getComputerUsePipePaths() {
   const paths = [];
   const nativePipeDirectory =
-    getComputerUsePrivilegedNodeRepl()?.env?.SKY_CUA_NATIVE_PIPE_DIRECTORY;
+__NATIVE_PIPE_ENV_LINE__
   if (typeof nativePipeDirectory === "string") {
     const trimmed = nativePipeDirectory.trim();
     if (trimmed) {
@@ -627,6 +645,7 @@ function discoverComputerUsePipePaths() {
   }
 }
 '@).Replace("`r`n", "`n").Trim("`r", "`n")
+        $newFunction = $newFunction.Replace('__NATIVE_PIPE_ENV_LINE__', $newFunctionEnvLine)
 
         if (
             -not $content.Contains($oldImport) -or
@@ -734,10 +753,14 @@ Copy-Item -Path (Join-Path $scriptRoot 'setup-codex-offline.ps1') -Destination (
 Write-BuildTrace 'Copying desktop IPC interception patches.'
 $desktopPatchesSource = Join-Path $scriptRoot 'desktop-patches'
 if (Test-Path $desktopPatchesSource) {
-  $desktopPatchesDest = Join-Path $internalRoot 'patches'
-  New-Item -ItemType Directory -Force -Path $desktopPatchesDest | Out-Null
-  Copy-Item -Path (Join-Path $desktopPatchesSource '*') -Destination $desktopPatchesDest -Recurse -Force
-  Write-BuildTrace 'Desktop patches copied to _internal/patches/.'
+  foreach ($desktopPatchesDest in @(
+    (Join-Path $internalRoot 'patches'),
+    (Join-Path $internalRoot 'app\patches')
+  )) {
+    New-Item -ItemType Directory -Force -Path $desktopPatchesDest | Out-Null
+    Copy-Item -Path (Join-Path $desktopPatchesSource '*') -Destination $desktopPatchesDest -Recurse -Force
+  }
+  Write-BuildTrace 'Desktop patches copied to _internal/patches/ and app/patches/.'
 } else {
   Write-BuildTrace 'Desktop patches source not found — continuing without IPC interception.'
 }
@@ -832,7 +855,7 @@ $dailyLaunchCmd = @(
     '@echo off',
     'setlocal',
     'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
-    'start "" "%~dp0_internal\app\Codex.exe" %*'
+    'start "" /D "%~dp0_internal\app" "%~dp0_internal\app\Codex.exe" %*'
 )
 $dailyLaunchCmd | Set-Content -Path (Join-Path $packageRoot 'Codex.cmd') -Encoding ASCII
 
@@ -877,7 +900,7 @@ $launchDirectCmd = @(
     '@echo off',
     'setlocal',
     'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
-    'start "" "%~dp0..\app\Codex.exe" %*'
+    'start "" /D "%~dp0..\app" "%~dp0..\app\Codex.exe" %*'
 )
 $launchDirectCmd | Set-Content -Path (Join-Path $toolsRoot 'Launch Codex Direct.cmd') -Encoding ASCII
 
