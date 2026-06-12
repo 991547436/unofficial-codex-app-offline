@@ -299,8 +299,6 @@ function resolveMainEntry(extractDir) {
 }
 
 const PATCH_MARKER = '/* codex-offline:windowsStore-patch */';
-const DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER =
-  contractPatchMarker('/*codex-offline:disable-auto-updater-breadcrumb*/');
 const LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER =
   '/*codex-offline:electron-namespace-no-auto-updater*/';
 const COMPUTER_USE_ENV_DEFAULT =
@@ -2259,53 +2257,12 @@ try {
     );
   }
 
-  // Newer Windows Store builds expose electron.autoUpdater through an MSIX
-  // native binding. Portable offline launches do not have that binding, and
-  // Sentry's default Electron breadcrumb setup reads autoUpdater during
-  // bootstrap. Disable only that breadcrumb hook so startup does not abort.
-  const autoUpdaterBreadcrumbPatchedFiles = [];
-  const autoUpdaterBreadcrumbAlreadyCorrectFiles = [];
-  const autoUpdaterBreadcrumbNeedle = 'autoUpdater:()=>!0';
-  const autoUpdaterBreadcrumbReplacement =
-    `autoUpdater:()=>!1${DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER}`;
-  const autoUpdaterBreadcrumbSetupNeedle =
-    'n.autoUpdater&&a(t.autoUpdater,`autoUpdater`,n.autoUpdater)';
-  const autoUpdaterBreadcrumbSetupReplacement =
-    `!1&&a(t.autoUpdater,\`autoUpdater\`,n.autoUpdater)${DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER}`;
-
-  for (const filePath of mainBundleFiles) {
-    let content = fs.readFileSync(filePath, 'utf8');
-    const alreadyCorrect = content.includes(DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER);
-    if (!content.includes(autoUpdaterBreadcrumbNeedle) &&
-        !content.includes(autoUpdaterBreadcrumbSetupNeedle)) {
-      if (alreadyCorrect) {
-        autoUpdaterBreadcrumbAlreadyCorrectFiles.push(path.relative(tmpDir, filePath));
-      }
-      continue;
-    }
-
-    content = content.replaceAll(
-      autoUpdaterBreadcrumbNeedle,
-      autoUpdaterBreadcrumbReplacement,
-    ).replaceAll(
-      autoUpdaterBreadcrumbSetupNeedle,
-      autoUpdaterBreadcrumbSetupReplacement,
-    );
-    fs.writeFileSync(filePath, content, 'utf8');
-    autoUpdaterBreadcrumbPatchedFiles.push(path.relative(tmpDir, filePath));
-  }
-
-  if (autoUpdaterBreadcrumbPatchedFiles.length > 0) {
-    log(
-      'Electron autoUpdater breadcrumb disabled for portable startup in ' +
-      `${autoUpdaterBreadcrumbPatchedFiles.join(', ')}.`,
-    );
-  } else if (autoUpdaterBreadcrumbAlreadyCorrectFiles.length > 0) {
-    log('Electron autoUpdater breadcrumb already disabled for portable startup.');
-  } else {
-    warn('Could not locate Electron autoUpdater breadcrumb defaults. ' +
-         'Portable startup guard skipped (the app version may have changed).');
-  }
+  // Note: the former "autoUpdater breadcrumb" needle patch (which rewrote
+  // Sentry's `autoUpdater:()=>!0` so it would not read electron.autoUpdater at
+  // bootstrap) is no longer needed. The MSIX updater binding stub injected into
+  // the main entry intercepts process._linkedBinding("electron_browser_msix_updater")
+  // at a stable interface boundary, so reading electron.autoUpdater can no
+  // longer abort startup — making the brittle minified needle obsolete.
 
   // ── Patch 8: Normalize Windows automation cwd paths at runtime ───────
   //

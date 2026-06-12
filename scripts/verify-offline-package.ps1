@@ -991,8 +991,6 @@ const SLASH_UI_MARKERS = [
 ];
 const CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
 const CODEX_MOBILE_AUTH_RELOGIN_MARKER = requiredPatchMarker('/*codex-offline:codex-mobile-auth-relogin*/');
-const DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER =
-  requiredPatchMarker('/*codex-offline:disable-auto-updater-breadcrumb*/');
 const LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER =
   '/*codex-offline:electron-namespace-no-auto-updater*/';
 const BUNDLED_BROWSER_PLUGINS_PATCH_MARKER = requiredPatchMarker('/*codex-offline:bundled-browser-plugins-no-force-reload*/');
@@ -1138,11 +1136,9 @@ let pluginsApiKeyRoutePatched = false;
 let rendererKnownStatsigGatesPatched = false;
 let codexMobileRemoteControlMfaEndpointSeen = false;
 let codexMobileAuthReloginPatched = false;
-let autoUpdaterBreadcrumbPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
 const settingsRouteResiduals = [];
 const localeSourceResiduals = [];
-const autoUpdaterBreadcrumbResiduals = [];
 const legacyElectronNamespacePatchResiduals = [];
 const bundledPluginCacheLockFatalResiduals = [];
 const webviewBrokenBooleanPatchResiduals = [];
@@ -1254,7 +1250,6 @@ for (const entry of javaScriptEntries) {
   pluginsApiKeyRoutePatched ||= content.includes(PLUGINS_API_KEY_ROUTE_PATCH_MARKER);
   codexMobileRemoteControlMfaEndpointSeen ||= content.includes(CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT);
   codexMobileAuthReloginPatched ||= content.includes(CODEX_MOBILE_AUTH_RELOGIN_MARKER);
-  autoUpdaterBreadcrumbPatched ||= content.includes(DISABLE_AUTO_UPDATER_BREADCRUMB_MARKER);
   if (content.includes(LEGACY_ELECTRON_NAMESPACE_PATCH_MARKER)) {
     legacyElectronNamespacePatchResiduals.push(entry);
   }
@@ -1270,12 +1265,6 @@ for (const entry of javaScriptEntries) {
   }
   if (content.includes(LOCALE_SOURCE_BAD_PATTERN)) {
     localeSourceResiduals.push(entry);
-  }
-  if (
-    content.includes('autoUpdater:()=>!0') ||
-    content.includes('n.autoUpdater&&a(t.autoUpdater,`autoUpdater`,n.autoUpdater)')
-  ) {
-    autoUpdaterBreadcrumbResiduals.push(entry);
   }
 
 }
@@ -1309,15 +1298,6 @@ if (!rendererKnownStatsigGatesPatched && rendererKnownStatsigGateLiteralEntries.
     'Renderer webview assets contain offline-known Statsig gate literals but no direct-gate patch marker: ' +
     rendererKnownStatsigGateLiteralEntries.join(', ')
   );
-}
-if (autoUpdaterBreadcrumbResiduals.length > 0) {
-  throw new Error(
-    'Electron autoUpdater breadcrumb still reads autoUpdater during portable startup: ' +
-    autoUpdaterBreadcrumbResiduals.join(', ')
-  );
-}
-if (!autoUpdaterBreadcrumbPatched) {
-  throw new Error('Electron autoUpdater breadcrumb portable startup guard marker is missing.');
 }
 if (legacyElectronNamespacePatchResiduals.length > 0) {
   throw new Error(
