@@ -134,6 +134,26 @@
  *    config and only inject a CLI override for the desktop app's internal
  *    `codex app-server` launch.
  *
+ * Patch hardening principles (follow these when adding a patch — they exist so
+ * an upstream bundle change fails the build instead of silently shipping a
+ * broken package):
+ *
+ *   - Required vs optional. If a patch's absence breaks launch or a core
+ *     feature, report a miss with failRequiredPatch() so the build fails before
+ *     repacking; peripheral patches (diagnostics, resilience, legacy, non-core
+ *     plugins) use warn(). A drift summary of both is printed each run.
+ *   - Prefer stable interface boundaries over minified needles. Intercept at a
+ *     durable seam — e.g. process._linkedBinding for the MSIX updater stub, or
+ *     init.cjs IPC interception for Statsig gates — instead of string-replacing
+ *     compiled tokens, which churn on every upstream build. This is the single
+ *     most effective way to reduce per-release patch breakage.
+ *   - When a needle is unavoidable, anchor on stable text (API names, error
+ *     strings, gate IDs) rather than minified variable names, and keep the
+ *     multi-variant fallbacks (V1/V2/V3) that absorb token churn.
+ *   - Every required patch needs a matching assertion in
+ *     verify-offline-package.ps1 (marker or behaviour) so a silent miss in this
+ *     script is still caught downstream.
+ *
  * Usage:
  *   node scripts/patch-app-asar.mjs --app-dir <path-to-app-dir>
  *
@@ -143,7 +163,8 @@
  *
  * Exit codes:
  *   0  Patch applied (or already applied, idempotent).
- *   1  Fatal error (asar not found, parse failure, …).
+ *   1  Fatal error — asar not found, parse failure, or a required patch did not
+ *      apply (the upstream bundle structure likely changed).
  */
 
 import { createRequire } from 'module';
