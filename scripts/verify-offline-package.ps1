@@ -1105,6 +1105,12 @@ if (!mainContent.includes(PATCH_MARKER)) {
 if (!mainContent.includes('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
   throw new Error('Computer Use environment default is missing from the main entry.');
 }
+if (!mainContent.includes('_codexOfflineMsixStub')) {
+  throw new Error('MSIX auto-updater binding stub is missing from the main entry.');
+}
+if (!mainContent.includes('electron_browser_msix_updater')) {
+  throw new Error('MSIX auto-updater binding stub does not target electron_browser_msix_updater.');
+}
 
 const javaScriptEntries = entries.filter(entry => entry.endsWith('.js'));
 
