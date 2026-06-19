@@ -1211,7 +1211,7 @@ for (const entry of javaScriptEntries) {
     content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER) &&
     content.includes('namespace:`node_repl`') &&
     content.includes('name:`js`') &&
-    content.includes('This forwards to node_repl.js') &&
+    (content.includes('This forwards to node_repl.js') || content.includes('type:`namespace`,name:`node_repl`')) &&
     content.includes('persistent Node REPL');
   computerUseNodeReplDynamicToolCallPatched ||=
     content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
