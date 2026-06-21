@@ -3824,11 +3824,11 @@ try {
         content.includes(FAST_MODE_KEY_MARKER) &&
         FAST_MODE_SERVICE_TIER_ALLOWED_RE.test(content)
       ) {
-        // v26.608+: patch isServiceTierAllowed to not require chatgpt auth or a non-null
-        // backend response — allows API-key users to see and use the Fast mode selector.
+        // v26.608+: force isServiceTierAllowed to true unconditionally, ignoring auth and any
+        // backend response — so the Fast/Standard speed selector is always shown and selectable.
         const patched = content.replace(
           FAST_MODE_SERVICE_TIER_ALLOWED_RE,
-          `$1=!$3&&($4==null||$4?.requirements?.featureRequirements?.fast_mode!==!1)${FAST_MODE_AUTH_METHOD_PATCH_MARKER}`,
+          `$1=!0${FAST_MODE_AUTH_METHOD_PATCH_MARKER}`,
         );
         if (patched !== content) {
           content = patched;
