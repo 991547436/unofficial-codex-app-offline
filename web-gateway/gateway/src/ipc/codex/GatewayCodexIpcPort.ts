@@ -67,10 +67,10 @@ function payloadShape(payload) {
   return typeof payload;
 }
 
-// ===== Hover Card / Pinned Threads BEGIN: 持久�?key =====
-// 官方首页 hover card �?pin 状态通过 pinned-thread-ids 读写，Web 侧在 gateway 里桥接这�?Electron IPC�?
+// ===== Hover Card / Pinned Threads BEGIN: 持久�?key =====
+// 官方首页 hover card �?pin 状态通过 pinned-thread-ids 读写，Web 侧在 gateway 里桥接这�?Electron IPC�?
 const PINNED_THREAD_IDS_STATE_KEY = "pinned-thread-ids";
-// ===== Hover Card / Pinned Threads END: 持久�?key =====
+// ===== Hover Card / Pinned Threads END: 持久�?key =====
 
 const WARNED_UNSUPPORTED_FEATURE_ENABLEMENTS = new Set();
 const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
@@ -100,7 +100,7 @@ const GLOBAL_STATE = new Map([
   ["notifications-questions-enabled", false],
 ]);
 const PERSISTED_STATE = {};
-// settings/configuration 只作为当前进程内的热缓存；真实持久化统一写回本机 Codex Desktop 状态�?
+// settings/configuration 只作为当前进程内的热缓存；真实持久化统一写回本机 Codex Desktop 状态�?
 const SETTINGS_STATE = {};
 const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "app-shell-shortcut-state-changed",
@@ -132,7 +132,7 @@ const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "view-focused",
 ]);
 
-/** 只有 statsig initialize 需�?patch，其�?ChatGPT 后端请求不能误改�?*/
+/** 只有 statsig initialize 需�?patch，其�?ChatGPT 后端请求不能误改�?*/
 function shouldPatchStatsigInitialize(urlObject) {
   return (
     urlObject &&
@@ -141,7 +141,7 @@ function shouldPatchStatsigInitialize(urlObject) {
   );
 }
 
-/** 生成注入�?web-shell 的运行时配置�?*/
+/** 生成注入�?web-shell 的运行时配置�?*/
 function buildGatewayConfig() {
   const workspaceRoots = workspaceIpc.parseWorkspaceRoots();
   return {
@@ -229,10 +229,10 @@ const recommendedSkills = createRecommendedSkillsIpcHandlers({
 });
 
 /**
- * 构�?Codex 业务 IPC handler 集合�?
+ * 构�?Codex 业务 IPC handler 集合�?
  *
- * 这里是业务层核心：能本地处理的直接处理，需要真�?Codex 数据的转发给
- * app-server，需要浏览器响应的通过 broadcast �?web-shell�?
+ * 这里是业务层核心：能本地处理的直接处理，需要真�?Codex 数据的转发给
+ * app-server，需要浏览器响应的通过 broadcast �?web-shell�?
  */
 function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
   const gitIpc = createGitIpcHandlers({
@@ -264,7 +264,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     patchCodexConfigResult,
   });
 
-  /** �?invoke context 中取浏览�?clientId�?*/
+  /** �?invoke context 中取浏览�?clientId�?*/
   function contextClientId(context) {
     return context && typeof context === "object" && typeof context.clientId === "string"
       ? context.clientId
@@ -334,19 +334,19 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     workspaceIpc,
   });
 
-  /** fetch/mcp 响应默认回到发起请求的浏览器�?*/
+  /** fetch/mcp 响应默认回到发起请求的浏览器�?*/
   function targetClientIdForContext(context) {
     return contextClientId(context);
   }
 
-  /** 给广播消息附�?targetClientId�?*/
+  /** 给广播消息附�?targetClientId�?*/
   function withTargetClient(message, targetClientId) {
     return targetClientId ? { ...message, targetClientId } : message;
   }
 
   // ===== Hover Card / Pinned Threads BEGIN: 缓存刷新广播 =====
-  // pinned 状态变化后需要主动失效官�?query cache，否�?hover card 的置顶状态不会立即刷新�?
-  /** pinned threads 变更后通知官方 query 缓存失效，首�?hover/pin 状态会自然刷新�?*/
+  // pinned 状态变化后需要主动失效官�?query cache，否�?hover card 的置顶状态不会立即刷新�?
+  /** pinned threads 变更后通知官方 query 缓存失效，首�?hover/pin 状态会自然刷新�?*/
   function broadcastPinnedThreadsChanged(threadIds) {
     if (typeof broadcast !== "function") return;
     broadcast({
@@ -446,11 +446,6 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     const conversationId = threadIdFromPayload(payload);
     const hostId = hostIdFromPayload(payload);
     if (!conversationId) return true;
-    try {
-      await appServerBridge.callAppServer("thread/archive", { threadId: conversationId });
-    } catch (error) {
-      logger && logger.warn("[ipc] app-server thread/archive failed; preserving desktop archived state", error);
-    }
     const archived = workspaceRuntime.listArchivedThreads();
     if (!archived.some((item) => item && item.id === conversationId)) {
       const params = payloadParams(payload) || {};
@@ -467,6 +462,15 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       workspaceRuntime.setArchivedThreads(archived);
     }
     broadcastArchivedThreadsChanged(hostId);
+    if (appServer && typeof appServer.isConnected === "function" && appServer.isConnected()) {
+      runDetached("archive-to-appserver", async () => {
+        try {
+          await appServerBridge.callAppServer("thread/archive", { threadId: conversationId });
+        } catch (error) {
+          logger && logger.warn("[ipc] app-server thread/archive failed (bg)", error);
+        }
+      });
+    }
     return true;
   }
 
@@ -474,13 +478,17 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     const conversationId = threadIdFromPayload(payload);
     const hostId = hostIdFromPayload(payload);
     if (!conversationId) return true;
-    try {
-      await appServerBridge.callAppServer("thread/unarchive", { threadId: conversationId });
-    } catch (error) {
-      logger && logger.warn("[ipc] app-server thread/unarchive failed; clearing desktop archived state", error);
-    }
     workspaceRuntime.setArchivedThreads(workspaceRuntime.listArchivedThreads().filter((item) => item && item.id !== conversationId));
     broadcastArchivedThreadsChanged(hostId);
+    if (appServer && typeof appServer.isConnected === "function" && appServer.isConnected()) {
+      runDetached("unarchive-to-appserver", async () => {
+        try {
+          await appServerBridge.callAppServer("thread/unarchive", { threadId: conversationId });
+        } catch (error) {
+          logger && logger.warn("[ipc] app-server thread/unarchive failed (bg)", error);
+        }
+      });
+    }
     return true;
   }
 
@@ -520,7 +528,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     }
   }
 
-  /** Codex 业务 IPC 总分发。未�?channel 必须抛错，不能再静默返回 null�?*/
+  /** Codex 业务 IPC 总分发。未�?channel 必须抛错，不能再静默返回 null�?*/
   const handle = async (channel, payload, context = {}) => {
     switch (channel) {
       case "app:getPlatform":
@@ -568,7 +576,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return result;
       }
       // ===== Hover Card / Pinned Threads BEGIN: renderer IPC handler =====
-      // 官方 renderer 在首�?hover card/pin 交互中调用这三路 IPC；gateway 本地完成读写并广播刷新�?
+      // 官方 renderer 在首�?hover card/pin 交互中调用这三路 IPC；gateway 本地完成读写并广播刷新�?
       case "list-pinned-threads":
         return { threadIds: desktopState.readPinnedThreadIds() };
       case "set-thread-pinned": {
@@ -613,7 +621,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "get-config-requirements-for-host":
         return patchConfigRequirementsResult(await appServerBridge.callAppServer("configRequirements/read", undefined));
       case "codex-agents-md": {
-        // Web 环境没有 Chronicle，直接读�?workspace roots 下的 AGENTS.md/CLAUDE.md
+        // Web 环境没有 Chronicle，直接读�?workspace roots 下的 AGENTS.md/CLAUDE.md
         const roots = workspaceIpc.parseWorkspaceRoots();
         const fs = require("fs");
         const path = require("path");
@@ -650,22 +658,22 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return appServerBridge.callAppServer("experimentalFeature/list", params || {});
       }
       case "chronicle-permissions":
-        // Web环境没有 Electron Chronicle sidecar，返回稳定状态让官方设置页正常渲染�?
+        // Web环境没有 Electron Chronicle sidecar，返回稳定状态让官方设置页正常渲染�?
         return chroniclePermissionsStatus();
       case "pick-files":
-        // 文件选择�?web-shell 调浏览器 picker，gateway 负责落盘并返回官�?renderer 需要的 fsPath�?
+        // 文件选择�?web-shell 调浏览器 picker，gateway 负责落盘并返回官�?renderer 需要的 fsPath�?
         return localFiles.pickFilesForWeb(payload);
       case "read-file-metadata":
         return localFiles.readFileMetadata(payload);
       case "read-file-binary":
         return localFiles.readFileBinary(payload);
       case "list-automations":
-        // Web 只是控制面：优先请求 Desktop/App 后端；离线或旧后端时只读展示本机定义�?
+        // Web 只是控制面：优先请求 Desktop/App 后端；离线或旧后端时只读展示本机定义�?
         return callAutomationBackend(channel, payload, () => automationIpc.listAutomations());
       case "list-pending-automation-run-threads":
         return { threadIds: [] };
       case "load-recent-conversation-ids-for-host":
-        // Web 目前不维�?automation run 历史，只给前端一个稳定空列表避免阻塞页面�?
+        // Web 目前不维�?automation run 历史，只给前端一个稳定空列表避免阻塞页面�?
         return [];
       case "automation-run-now":
       case "automation-create":
@@ -764,7 +772,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return conversationIpc.startConversation(payload);
       case "start-thread-for-host": {
         const result = await appServerBridge.callAppServer("thread/start", payload);
-        // 这个入口直接暴露 thread/start，必须同样记录真�?thread �?Desktop 元数据�?
+        // 这个入口直接暴露 thread/start，必须同样记录真�?thread �?Desktop 元数据�?
         workspaceRuntime.recordThreadStartMetadata(result, payload);
         return result;
       }
@@ -822,7 +830,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return sharedObjectIpc.subscribeSharedObject(payload);
       case "thread:start": {
         const result = await appServerBridge.callAppServer("thread/start", payload);
-        // 兼容旧式 thread:start channel，保持和 start-conversation 一样的刷新后归属信息�?
+        // 兼容旧式 thread:start channel，保持和 start-conversation 一样的刷新后归属信息�?
         workspaceRuntime.recordThreadStartMetadata(result, payload);
         return result;
       }
@@ -873,7 +881,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       default:
         if (channel.startsWith("codex_desktop:worker:") && channel.endsWith(":from-view")) {
           const handled = workerIpc.handleWorkerMessage(channel, payload);
-          // worker 通道也要把未支持能力暴露给前端，避免只留 gateway 日志�?
+          // worker 通道也要把未支持能力暴露给前端，避免只留 gateway 日志�?
           if (!handled) throw new Error(`Unsupported Codex worker message: ${channel}`);
           return true;
         }
@@ -887,16 +895,16 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
   };
 }
 
-/** Codex 业务 IPC 端口实现，只负责业务 channel，不实现 Electron 通用 IPC 语义�?*/
+/** Codex 业务 IPC 端口实现，只负责业务 channel，不实现 Electron 通用 IPC 语义�?*/
 class GatewayCodexIpcPort {
   handlers;
 
-  /** 初始化业�?handler；是否支持某�?channel �?handler 自己�?switch 决定�?*/
+  /** 初始化业�?handler；是否支持某�?channel �?handler 自己�?switch 决定�?*/
   constructor({ appServer, broadcast, logger, isClientConnected }) {
     this.handlers = makeHandlers({ appServer, broadcast, logger, isClientConnected });
   }
 
-  /** 执行具体 Codex 业务 IPC�?*/
+  /** 执行具体 Codex 业务 IPC�?*/
   handleCodexRequest(channel, payload, context) {
     return this.handlers.handle(channel, payload, context);
   }
