@@ -495,6 +495,11 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
   async function hydratePinnedThreadsForPayload(payload) {
     const threadIds = threadIdsFromPayload(payload);
     if (threadIds.length === 0) return { threadIds: [] };
+    // 离线时跳过 app-server 验证，本地过滤掉已归档的即可
+    if (!appServer || typeof appServer.isConnected !== "function" || !appServer.isConnected()) {
+      const archivedIds = new Set(workspaceRuntime.listArchivedThreads().map((item) => item && item.id).filter(Boolean));
+      return { threadIds: threadIds.filter((id) => !archivedIds.has(id)) };
+    }
     const archivedIds = new Set((await listArchivedThreadsForPayload(payload)).map((item) => item.id));
     const hydratedThreadIds = [];
     for (const threadId of threadIds) {
@@ -503,7 +508,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         await appServerBridge.callAppServer("thread/read", { threadId, includeTurns: false });
         hydratedThreadIds.push(threadId);
       } catch (error) {
-        logger && logger.warn(`[ipc] failed to hydrate pinned thread: ${threadId}`, error);
+        logger && logger.warn("[ipc] failed to hydrate pinned thread: " + String(threadId), error);
       }
     }
     return { threadIds: hydratedThreadIds };

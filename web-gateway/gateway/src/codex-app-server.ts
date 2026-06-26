@@ -195,6 +195,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
   let lastError = null;
   let reconnectTimer = null;
   let reconnectAttempts = 0;
+  let reconnectGaveUpAt = 0;
   let disposed = false;
   const pendingTurnsByThreadId = new Map();
   const pendingTurnIdleTimers = new Map();
@@ -515,6 +516,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
 
   /** 把缓存刷新放到后台执行，并对相同 key 去重�?*/
   function scheduleCacheRefresh(requests) {
+    if (!connected) return;
     const uniqueRequests = [];
     for (const [method, params] of requests || []) {
       const normalizedParams = normalizeParams(method, params);
@@ -558,6 +560,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectAttempts++;
     if (reconnectAttempts > 10) {
+      reconnectGaveUpAt = Date.now();
       logger && logger.warn("[app-server] max reconnect attempts reached, giving up");
       return;
     }
@@ -577,6 +580,7 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
       reconnectTimer = null;
     }
     reconnectAttempts = 0;
+    reconnectGaveUpAt = 0;
     connected = true;
     connecting = false;
     lastError = null;
@@ -811,6 +815,10 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
     if (disposed) throw new Error("app-server client disposed");
     if (connected) return;
     if (connecting && connectionPromise) return connectionPromise;
+    // 放弃重连后的冷静期：避免每次用户操作都触发 spawn-crash
+    if (reconnectAttempts > 10 && reconnectGaveUpAt > 0 && (Date.now() - reconnectGaveUpAt) < 5 * 60 * 1000) {
+      throw new Error("app-server reconnect cooling down");
+    }
     connecting = true;
     connectionPromise = new Promise((resolve, reject) => {
       connectionResolve = resolve;
