@@ -1262,7 +1262,9 @@ function patchChromeSkillInstructions(chromePluginRoot) {
     'In bundled/offline desktop sessions, the trusted browser-client path is the `openai-bundled` runtime marketplace copy, not the persistent plugin cache. Prefer this root when it exists: `<codex home>/.tmp/bundled-marketplaces/openai-bundled/plugins/chrome`. Resolve `<codex home>` from `process.env.CODEX_HOME` or the user home `.codex` directory, then import `scripts/browser-client.mjs` from that root. Fall back to this skill plugin root only when the runtime marketplace copy does not exist.';
 
   if (!matched) {
-    throw new Error('Could not locate Chrome skill browser-client bootstrap paragraph.');
+    log("WARNING: Could not locate Chrome skill browser-client bootstrap paragraph (app version may have changed). Skipping.");
+    optionalPatchWarnings.push("chrome-skill-browser-client-bootstrap");
+    return;
   }
 
   content = content.replace(needle, replacement);
