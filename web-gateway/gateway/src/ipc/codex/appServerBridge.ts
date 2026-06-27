@@ -97,9 +97,6 @@ function createAppServerBridge(deps) {
       }
     }
     try {
-      if (!appServer || !appServer.isConnected()) {
-        throw new Error(`app-server is not connected for ${appServerMethod}`);
-      }
       return enrichWorkedForAppServerResult(appServerMethod, await appServer.request(appServerMethod, appServerPayload));
     } catch (error) {
       if (appServerMethod === "app/list" && isOptionalAppDirectoryFailure(error)) {
