@@ -771,8 +771,15 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "projects:browse":
         return workspaceIpc.browseProjects(payload);
       case "threads:list":
-      case "thread:list":
-        return appServerBridge.callAppServer("thread/list", payload);
+      case "thread:list": {
+        const threadListResult = await appServerBridge.callAppServer("thread/list", payload);
+        const localArchived = workspaceRuntime.listArchivedThreads();
+        if (localArchived.length > 0 && threadListResult && Array.isArray(threadListResult.data)) {
+          const archivedIds = new Set(localArchived.map((item) => item && item.id).filter(Boolean));
+          threadListResult.data = threadListResult.data.filter((thread) => !thread || !archivedIds.has(thread.id));
+        }
+        return threadListResult;
+      }
       case "start-conversation":
         return conversationIpc.startConversation(payload);
       case "start-thread-for-host": {
