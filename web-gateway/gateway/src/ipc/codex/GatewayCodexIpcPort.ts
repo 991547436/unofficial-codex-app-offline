@@ -424,22 +424,17 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
 
   async function listArchivedThreadsForPayload(payload) {
     const desktopThreads = workspaceRuntime.listArchivedThreads();
-    // Return local state immediately; skip app-server fetch when offline
-    if (appServer && typeof appServer.isConnected === "function" && appServer.isConnected()) {
-      runDetached("sync-archived-threads", async () => {
-        try {
-          const appServerThreads = await listAppServerArchivedThreads();
-          if (appServerThreads.length > 0) {
-            const merged = mergeArchivedThreads(appServerThreads, desktopThreads);
-            workspaceRuntime.setArchivedThreads(merged);
-            broadcastArchivedThreadsChanged("local");
-          }
-        } catch (error) {
-          logger && logger.warn("[ipc] background app-server archived thread fetch failed", error);
-        }
-      });
+    if (!appServer || typeof appServer.isConnected !== "function" || !appServer.isConnected()) {
+      return desktopThreads;
     }
-    return desktopThreads;
+
+    const appServerThreads = await listAppServerArchivedThreads();
+    const merged = mergeArchivedThreads(appServerThreads, desktopThreads);
+    if (appServerThreads.length > 0) {
+      workspaceRuntime.setArchivedThreads(merged);
+      broadcastArchivedThreadsChanged(hostIdFromPayload(payload));
+    }
+    return merged;
   }
 
   async function archiveConversationForPayload(payload) {

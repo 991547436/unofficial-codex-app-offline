@@ -1637,6 +1637,8 @@ try {
     contractPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool*/');
   const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER =
     contractPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
+  const ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:archived-threads-partial-list*/');
   const COMPUTER_USE_INPUT_MENTION_HELPER =
     'function _codexOfflineComputerUseMentionItems(e){let t=typeof e==`string`?e.trimStart():``;' +
     'let n=t.match(/\\[(@?(?:[^\\]]+))\\]\\((plugin:\\/\\/computer-use(?:@[^)]+)?)\\)/),' +
@@ -2135,6 +2137,43 @@ try {
     const next = content.replace(
       COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_CURRENT_V2_RE,
       computerUseNodeReplDynamicToolCallCurrentV2Replacement,
+    );
+    return { content: next, alreadyCorrect: false, patched: next !== content };
+  }
+  const ARCHIVED_THREADS_LIST_ALL_RE =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=await \2\.sendRequest\(`thread\/list`,\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\}\);\8\.push\(\.\.\.\11\.data\),\11\.nextCursor&&await \9\(\11\.nextCursor\)\};return await \9\(null\),\8\}/;
+  function patchArchivedThreadsPartialList(content) {
+    if (content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER)) {
+      return { content, alreadyCorrect: true, patched: false };
+    }
+
+    const next = content.replace(
+      ARCHIVED_THREADS_LIST_ALL_RE,
+      (
+        _match,
+        functionName,
+        requestClient,
+        modelProviders,
+        archived,
+        sourceKinds,
+        defaultSourceKinds,
+        useStateDbOnly,
+        threads,
+        loadPage,
+        cursor,
+        page,
+      ) =>
+        `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
+        `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
+        `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${loadPage}=async ${cursor}=>{` +
+        `let ${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,{limit:200,` +
+        `cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
+        `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
+        `useStateDbOnly:${useStateDbOnly}})}catch(_codexOfflineArchiveListError){` +
+        `if(${archived})return;throw _codexOfflineArchiveListError}` +
+        `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
+        `};return await ${loadPage}(null),${threads}}` +
+        ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
     );
     return { content: next, alreadyCorrect: false, patched: next !== content };
   }
@@ -3748,8 +3787,10 @@ try {
     let rendererKnownStatsigGatePatchCount = 0;
     const computerUseNodeReplDynamicToolPatchedFiles = [];
     const computerUseNodeReplDynamicToolCallPatchedFiles = [];
+    const archivedThreadsPartialListPatchedFiles = [];
     let computerUseNodeReplDynamicToolAlreadyCorrect = false;
     let computerUseNodeReplDynamicToolCallAlreadyCorrect = false;
+    let archivedThreadsPartialListAlreadyCorrect = false;
 
     for (const filePath of webviewJsFiles) {
       let content = fs.readFileSync(filePath, 'utf8');
@@ -3772,6 +3813,16 @@ try {
         changed = true;
       } else if (computerUseNodeReplDynamicToolCallPatch.alreadyCorrect) {
         computerUseNodeReplDynamicToolCallAlreadyCorrect = true;
+      }
+
+      const archivedThreadsPartialListPatch =
+        patchArchivedThreadsPartialList(content);
+      if (archivedThreadsPartialListPatch.patched) {
+        content = archivedThreadsPartialListPatch.content;
+        archivedThreadsPartialListPatchedFiles.push(path.relative(tmpDir, filePath));
+        changed = true;
+      } else if (archivedThreadsPartialListPatch.alreadyCorrect) {
+        archivedThreadsPartialListAlreadyCorrect = true;
       }
 
       const rendererKnownStatsigGatePatch = patchDirectStatsigGateCalls(
@@ -3869,6 +3920,16 @@ try {
     } else {
       throw new Error(
         'Could not locate renderer dynamic tool call handler for Computer Use node_repl.js.',
+      );
+    }
+    if (archivedThreadsPartialListPatchedFiles.length > 0) {
+      log('Archived threads partial list fallback patched in ' +
+        `${archivedThreadsPartialListPatchedFiles.join(', ')}.`);
+    } else if (archivedThreadsPartialListAlreadyCorrect) {
+      log('Archived threads partial list fallback already patched.');
+    } else {
+      throw new Error(
+        'Could not locate renderer archived thread list pagination to patch.',
       );
     }
   }

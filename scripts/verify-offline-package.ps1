@@ -1017,6 +1017,8 @@ const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool*/');
 const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
+const ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:archived-threads-partial-list*/');
 const FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:feature-overrides-preserve-mcp-config*/');
 const FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER =
@@ -1128,6 +1130,7 @@ let computerUseInputSkillPatched = false;
 let computerUseThreadStartToolSearchPatched = false;
 let computerUseNodeReplDynamicToolPatched = false;
 let computerUseNodeReplDynamicToolCallPatched = false;
+let archivedThreadsPartialListPatched = false;
 let featureOverridesPreserveMcpConfigPatched = false;
 let featureEnablementPreserveUnifiedExecPatched = false;
 let bundledPluginCacheLockNonfatalPatched = false;
@@ -1217,6 +1220,11 @@ for (const entry of javaScriptEntries) {
     content.includes(COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER) &&
     hasComputerUseNodeReplDynamicToolCallBridge(content) &&
     content.includes('namespace==null');
+  archivedThreadsPartialListPatched ||=
+    content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER) &&
+    content.includes('_codexOfflineArchiveListError') &&
+    content.includes('thread/list') &&
+    content.includes('archived:');
   featureOverridesPreserveMcpConfigPatched ||=
     content.includes(FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER) &&
     content.includes('`features.unified_exec`]=!0') &&
@@ -1410,6 +1418,9 @@ if (!computerUseNodeReplDynamicToolPatched) {
 }
 if (!computerUseNodeReplDynamicToolCallPatched) {
   throw new Error('Computer Use node_repl.js dynamic tool call bridge marker is missing.');
+}
+if (!archivedThreadsPartialListPatched) {
+  throw new Error('Archived thread list pagination fallback marker is missing.');
 }
 if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
   info('Codex Mobile remote-control auth relogin is a legacy renderer patch outside the current Computer Use gate.');
