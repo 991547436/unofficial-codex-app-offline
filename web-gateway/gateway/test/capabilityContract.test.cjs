@@ -177,6 +177,7 @@ test("source data contract covers direct exe asar patch surfaces", () => {
     "/*codex-offline:computer-use-node-repl-dynamic-tool*/",
     "/*codex-offline:computer-use-node-repl-dynamic-tool-call*/",
     "/*codex-offline:archived-threads-partial-list*/",
+    "/*codex-offline:archived-threads-cache-fallback*/",
     "/*codex-offline:bundled-browser-plugins-no-force-reload*/",
     "/*codex-offline:fast-mode-selector*/",
     "/*codex-offline:fast-mode-auth-method*/",

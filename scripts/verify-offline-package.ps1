@@ -1051,6 +1051,8 @@ const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
 const ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:archived-threads-partial-list*/');
+const ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:archived-threads-cache-fallback*/');
 const FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:feature-overrides-preserve-mcp-config*/');
 const FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER =
@@ -1163,6 +1165,7 @@ let computerUseThreadStartToolSearchPatched = false;
 let computerUseNodeReplDynamicToolPatched = false;
 let computerUseNodeReplDynamicToolCallPatched = false;
 let archivedThreadsPartialListPatched = false;
+let archivedThreadsCacheFallbackPatched = false;
 let featureOverridesPreserveMcpConfigPatched = false;
 let featureEnablementPreserveUnifiedExecPatched = false;
 let bundledPluginCacheLockNonfatalPatched = false;
@@ -1257,6 +1260,11 @@ for (const entry of javaScriptEntries) {
     content.includes('_codexOfflineArchiveListError') &&
     content.includes('thread/list') &&
     content.includes('archived:');
+  archivedThreadsCacheFallbackPatched ||=
+    content.includes(ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER) &&
+    content.includes('__codexOfflineArchivedThreadsCache') &&
+    content.includes('_codexOfflineArchiveListFailed') &&
+    content.includes('globalThis.__codexOfflineArchivedThreadsCache');
   featureOverridesPreserveMcpConfigPatched ||=
     content.includes(FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER) &&
     content.includes('`features.unified_exec`]=!0') &&
@@ -1453,6 +1461,9 @@ if (!computerUseNodeReplDynamicToolCallPatched) {
 }
 if (!archivedThreadsPartialListPatched) {
   throw new Error('Archived thread list pagination fallback marker is missing.');
+}
+if (!archivedThreadsCacheFallbackPatched) {
+  throw new Error('Archived thread list cache fallback marker is missing.');
 }
 if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
   info('Codex Mobile remote-control auth relogin is a legacy renderer patch outside the current Computer Use gate.');

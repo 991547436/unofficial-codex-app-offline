@@ -1639,6 +1639,8 @@ try {
     contractPatchMarker('/*codex-offline:computer-use-node-repl-dynamic-tool-call*/');
   const ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER =
     contractPatchMarker('/*codex-offline:archived-threads-partial-list*/');
+  const ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:archived-threads-cache-fallback*/');
   const COMPUTER_USE_INPUT_MENTION_HELPER =
     'function _codexOfflineComputerUseMentionItems(e){let t=typeof e==`string`?e.trimStart():``;' +
     'let n=t.match(/\\[(@?(?:[^\\]]+))\\]\\((plugin:\\/\\/computer-use(?:@[^)]+)?)\\)/),' +
@@ -2144,8 +2146,17 @@ try {
     /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=await \2\.sendRequest\(`thread\/list`,\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\}\);\8\.push\(\.\.\.\11\.data\),\11\.nextCursor&&await \9\(\11\.nextCursor\)\};return await \9\(null\),\8\}/;
   const ARCHIVED_THREADS_LIST_ALL_QUERY_RE =
     /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\},([A-Za-z_$][\w$]*)=await \2\.sendRequest\(`thread\/list`,\11\);\8\.push\(\.\.\.\12\.data\),\12\.nextCursor&&await \9\(\12\.nextCursor\)\};return await \9\(null\),\8\}/;
+  const ARCHIVED_THREADS_LIST_ALL_PATCHED_DIRECT_RE =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*);try\{\11=await \2\.sendRequest\(`thread\/list`,\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\}\)\}catch\(_codexOfflineArchiveListError\)\{if\(\4\)return;throw _codexOfflineArchiveListError\}\8\.push\(\.\.\.\(\11\.data\?\?\[\]\)\),\11\.nextCursor&&await \9\(\11\.nextCursor\)\};return await \9\(null\),\8\}\/\*codex-offline:archived-threads-partial-list\*\//;
+  const ARCHIVED_THREADS_LIST_ALL_PATCHED_QUERY_RE =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\},([A-Za-z_$][\w$]*);try\{\12=await \2\.sendRequest\(`thread\/list`,\11\)\}catch\(_codexOfflineArchiveListError\)\{if\(\4\)return;throw _codexOfflineArchiveListError\}\8\.push\(\.\.\.\(\12\.data\?\?\[\]\)\),\12\.nextCursor&&await \9\(\12\.nextCursor\)\};return await \9\(null\),\8\}\/\*codex-offline:archived-threads-partial-list\*\//;
+  function archivedThreadsReturnExpression(archived, failed, threads) {
+    return `${archived}?(${failed}&&${threads}.length===0?` +
+      `(globalThis.__codexOfflineArchivedThreadsCache??${threads}):` +
+      `(globalThis.__codexOfflineArchivedThreadsCache=${threads},${threads})):${threads}`;
+  }
   function patchArchivedThreadsPartialList(content) {
-    if (content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER)) {
+    if (content.includes(ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER)) {
       return { content, alreadyCorrect: true, patched: false };
     }
 
@@ -2164,18 +2175,23 @@ try {
         loadPage,
         cursor,
         page,
-      ) =>
+      ) => {
+        const failed = '_codexOfflineArchiveListFailed';
+        return (
         `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
         `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
-        `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${loadPage}=async ${cursor}=>{` +
+        `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${failed}=!1,${loadPage}=async ${cursor}=>{` +
         `let ${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,{limit:200,` +
         `cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
         `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
         `useStateDbOnly:${useStateDbOnly}})}catch(_codexOfflineArchiveListError){` +
-        `if(${archived})return;throw _codexOfflineArchiveListError}` +
+        `if(${archived}){${failed}=!0;return}throw _codexOfflineArchiveListError}` +
         `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
-        `};return await ${loadPage}(null),${threads}}` +
-        ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
+        `};return await ${loadPage}(null),${archivedThreadsReturnExpression(archived, failed, threads)}}` +
+        ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER +
+        ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER
+        );
+      },
     );
     if (next === content) {
       next = content.replace(
@@ -2194,17 +2210,92 @@ try {
           cursor,
           query,
           page,
-        ) =>
+        ) => {
+          const failed = '_codexOfflineArchiveListFailed';
+          return (
           `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
           `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
-          `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${loadPage}=async ${cursor}=>{` +
+          `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${failed}=!1,${loadPage}=async ${cursor}=>{` +
           `let ${query}={limit:200,cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
           `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
           `useStateDbOnly:${useStateDbOnly}},${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,${query})` +
-          `}catch(_codexOfflineArchiveListError){if(${archived})return;throw _codexOfflineArchiveListError}` +
+          `}catch(_codexOfflineArchiveListError){if(${archived}){${failed}=!0;return}throw _codexOfflineArchiveListError}` +
           `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
-          `};return await ${loadPage}(null),${threads}}` +
-          ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
+          `};return await ${loadPage}(null),${archivedThreadsReturnExpression(archived, failed, threads)}}` +
+          ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER +
+          ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER
+          );
+        },
+      );
+    }
+    if (next === content) {
+      next = content.replace(
+        ARCHIVED_THREADS_LIST_ALL_PATCHED_DIRECT_RE,
+        (
+          _match,
+          functionName,
+          requestClient,
+          modelProviders,
+          archived,
+          sourceKinds,
+          defaultSourceKinds,
+          useStateDbOnly,
+          threads,
+          loadPage,
+          cursor,
+          page,
+        ) => {
+          const failed = '_codexOfflineArchiveListFailed';
+          return (
+          `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
+          `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
+          `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${failed}=!1,${loadPage}=async ${cursor}=>{` +
+          `let ${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,{limit:200,` +
+          `cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
+          `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
+          `useStateDbOnly:${useStateDbOnly}})}catch(_codexOfflineArchiveListError){` +
+          `if(${archived}){${failed}=!0;return}throw _codexOfflineArchiveListError}` +
+          `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
+          `};return await ${loadPage}(null),${archivedThreadsReturnExpression(archived, failed, threads)}}` +
+          ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER +
+          ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER
+          );
+        },
+      );
+    }
+    if (next === content) {
+      next = content.replace(
+        ARCHIVED_THREADS_LIST_ALL_PATCHED_QUERY_RE,
+        (
+          _match,
+          functionName,
+          requestClient,
+          modelProviders,
+          archived,
+          sourceKinds,
+          defaultSourceKinds,
+          useStateDbOnly,
+          threads,
+          loadPage,
+          cursor,
+          query,
+          page,
+        ) => {
+          const failed = '_codexOfflineArchiveListFailed';
+          return (
+          `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
+          `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
+          `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${failed}=!1,${loadPage}=async ${cursor}=>{` +
+          `let ${query}={limit:200,cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
+          `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
+          `useStateDbOnly:${useStateDbOnly}},${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,${query})` +
+          `}catch(_codexOfflineArchiveListError){if(${archived}){${failed}=!0;return}throw _codexOfflineArchiveListError}` +
+          `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
+          `};return await ${loadPage}(null),${archivedThreadsReturnExpression(archived, failed, threads)}}` +
+          ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER +
+          ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER
+          );
+        },
       );
     }
     return { content: next, alreadyCorrect: false, patched: next !== content };

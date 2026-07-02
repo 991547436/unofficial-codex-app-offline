@@ -200,6 +200,7 @@ const DESKTOP_ASAR_PATCH_MARKERS = Object.freeze([
   "/*codex-offline:computer-use-node-repl-dynamic-tool*/",
   "/*codex-offline:computer-use-node-repl-dynamic-tool-call*/",
   "/*codex-offline:archived-threads-partial-list*/",
+  "/*codex-offline:archived-threads-cache-fallback*/",
   "/*codex-offline:bundled-browser-plugins-no-force-reload*/",
   "/*codex-offline:bundled-runtime-plugins*/",
   "/*codex-offline:fast-mode-selector*/",
