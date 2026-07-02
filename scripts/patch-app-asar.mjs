@@ -2140,15 +2140,17 @@ try {
     );
     return { content: next, alreadyCorrect: false, patched: next !== content };
   }
-  const ARCHIVED_THREADS_LIST_ALL_RE =
+  const ARCHIVED_THREADS_LIST_ALL_DIRECT_RE =
     /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=await \2\.sendRequest\(`thread\/list`,\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\}\);\8\.push\(\.\.\.\11\.data\),\11\.nextCursor&&await \9\(\11\.nextCursor\)\};return await \9\(null\),\8\}/;
+  const ARCHIVED_THREADS_LIST_ALL_QUERY_RE =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\},([A-Za-z_$][\w$]*)=await \2\.sendRequest\(`thread\/list`,\11\);\8\.push\(\.\.\.\12\.data\),\12\.nextCursor&&await \9\(\12\.nextCursor\)\};return await \9\(null\),\8\}/;
   function patchArchivedThreadsPartialList(content) {
     if (content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER)) {
       return { content, alreadyCorrect: true, patched: false };
     }
 
-    const next = content.replace(
-      ARCHIVED_THREADS_LIST_ALL_RE,
+    let next = content.replace(
+      ARCHIVED_THREADS_LIST_ALL_DIRECT_RE,
       (
         _match,
         functionName,
@@ -2175,6 +2177,36 @@ try {
         `};return await ${loadPage}(null),${threads}}` +
         ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
     );
+    if (next === content) {
+      next = content.replace(
+        ARCHIVED_THREADS_LIST_ALL_QUERY_RE,
+        (
+          _match,
+          functionName,
+          requestClient,
+          modelProviders,
+          archived,
+          sourceKinds,
+          defaultSourceKinds,
+          useStateDbOnly,
+          threads,
+          loadPage,
+          cursor,
+          query,
+          page,
+        ) =>
+          `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
+          `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds},` +
+          `useStateDbOnly:${useStateDbOnly}=!1}){let ${threads}=[],${loadPage}=async ${cursor}=>{` +
+          `let ${query}={limit:200,cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
+          `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
+          `useStateDbOnly:${useStateDbOnly}},${page};try{${page}=await ${requestClient}.sendRequest(\`thread/list\`,${query})` +
+          `}catch(_codexOfflineArchiveListError){if(${archived})return;throw _codexOfflineArchiveListError}` +
+          `${threads}.push(...(${page}.data??[])),${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)` +
+          `};return await ${loadPage}(null),${threads}}` +
+          ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
+      );
+    }
     return { content: next, alreadyCorrect: false, patched: next !== content };
   }
   const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE =
