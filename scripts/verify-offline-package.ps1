@@ -125,11 +125,46 @@ $installerTemplateContent = Get-Content -Path $installerTemplatePath -Raw
 foreach ($needle in @(
     'DefaultDirName={%USERPROFILE|{localappdata}}\Codex',
     'UsePreviousAppDir=no',
+    '#define MyInstallerRoot "__INSTALLER_ROOT__"',
+    'Name: "zh"; MessagesFile: "{#MyInstallerRoot}\ChineseSimplified.isl"',
     'Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"',
-    'IconFilename: "{app}\_internal\app\Codex.exe"'
+    'IconFilename: "{app}\_internal\app\Codex.exe"',
+    'zh.TaskCodexLinks=注册用于 CLI /app 的 codex:// 链接',
+    'Name: "skills"; Description: "{cm:TaskSkills}"; Flags: unchecked',
+    'Name: "chromehost"; Description: "{cm:TaskChromeHost}"; Flags: unchecked',
+    'Name: "codexlinks"; Description: "{cm:TaskCodexLinks}"; Flags: unchecked',
+    'Name: "computeruse"; Description: "{cm:TaskComputerUse}"; Flags: unchecked',
+    'Name: "chromeguide"; Description: "{cm:TaskChromeGuide}"; Flags: unchecked',
+    'Software\Classes\codex',
+    'URL Protocol',
+    'Tasks: codexlinks',
+    'ValueData: """{app}\Codex.cmd"" ""%1"""',
+    'Filename: "{app}\Setup Codex.cmd"; Parameters: "{code:GetSetupCodexArgs} -NoLaunch"; Flags: skipifsilent shellexec',
+    'Filename: "{app}\Codex.cmd"; Description: "{cm:LaunchCodex}"; Flags: nowait postinstall skipifsilent shellexec',
+    'Result := ''-NonInteractive -Language '' + ActiveLanguage',
+    'WizardIsTaskSelected(''skills'')',
+    'WizardIsTaskSelected(''chromehost'')',
+    'WizardIsTaskSelected(''codexlinks'')',
+    'WizardIsTaskSelected(''computeruse'')',
+    'WizardIsTaskSelected(''chromeguide'')'
 )) {
     if (-not $installerTemplateContent.Contains($needle)) {
         throw "Installer template is missing expected launcher marker: $needle"
+    }
+}
+
+$installerLanguagePath = Join-Path $repoRoot 'installer\ChineseSimplified.isl'
+if (-not (Test-Path $installerLanguagePath)) {
+    throw "Installer Simplified Chinese language file was not found: $installerLanguagePath"
+}
+
+$installerLanguageContent = Get-Content -Path $installerLanguagePath -Raw
+foreach ($needle in @(
+    'LanguageName=简体中文',
+    'LanguageID=$0804'
+)) {
+    if (-not $installerLanguageContent.Contains($needle)) {
+        throw "Installer Simplified Chinese language file is missing expected marker: $needle"
     }
 }
 
@@ -321,11 +356,32 @@ try {
     $setupContent = Get-Content -Path $setupPath -Raw
     foreach ($needle in @(
         'Read-SetupYesNo',
+        'Read-SetupLanguage',
+        "[ValidateSet('auto', 'en', 'zh')]",
+        '[switch]$InstallSkillSync',
+        '[switch]$RegisterChromeHost',
+        '[switch]$RegisterCodexLinks',
+        '[switch]$RepairComputerUse',
+        '[switch]$OpenChromeGuide',
         'Start setup now?',
         'Install the default offline skills profile now?',
+        '$InstallSkillSync -or',
+        "Get-SetupText 'InstallSkillsPrompt') -DefaultYes `$false",
         'Register or repair @chrome native host access now?',
-        'Load Chrome extension',
-        'Repair Computer Use plugin layout',
+        '$RegisterChromeHost -or',
+        "Get-SetupText 'ChromeHostPrompt') -DefaultYes `$false",
+        '$OpenChromeGuide -or',
+        "Get-SetupText 'OpenChromePrompt') -DefaultYes `$false",
+        'Register codex:// app links',
+        "Get-SetupText 'LinksPrompt') -DefaultYes `$false",
+        '$RegisterCodexLinks -or',
+        'Register-CodexUrlProtocol',
+        'HKCU:\Software\Classes\codex',
+        'URL Protocol',
+        '`"$LauncherPath`" `"%1`"',
+        'Repair Computer Use plugin layout now?',
+        '$RepairComputerUse -or',
+        "Get-SetupText 'ComputerUsePrompt') -DefaultYes `$false",
         'Repair-ComputerUsePluginLayout',
         'chrome://extensions/',
         'Launch Codex now?',

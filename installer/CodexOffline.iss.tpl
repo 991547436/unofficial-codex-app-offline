@@ -2,6 +2,7 @@
 #define MyAppVersion "__APP_VERSION__"
 #define MyAppDirName "__APP_DIR_NAME__"
 #define MySourceRoot "__SOURCE_ROOT__"
+#define MyInstallerRoot "__INSTALLER_ROOT__"
 #define MyOutputRoot "__OUTPUT_ROOT__"
 #define MyOutputBaseName "__OUTPUT_BASENAME__"
 
@@ -24,8 +25,39 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 UsePreviousAppDir=no
 
+[Languages]
+Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "zh"; MessagesFile: "{#MyInstallerRoot}\ChineseSimplified.isl"
+
+[CustomMessages]
+en.TaskSkills=Install default offline skills
+zh.TaskSkills=安装默认离线技能
+en.TaskChromeHost=Register @chrome native host
+zh.TaskChromeHost=注册 @chrome 本机桥接
+en.TaskCodexLinks=Register codex:// links for CLI /app
+zh.TaskCodexLinks=注册用于 CLI /app 的 codex:// 链接
+en.TaskComputerUse=Repair Computer Use plugin layout
+zh.TaskComputerUse=修复 Computer Use 插件布局
+en.TaskChromeGuide=Open Chrome extension setup guide
+zh.TaskChromeGuide=打开 Chrome 扩展设置引导
+en.LaunchCodex=Launch Codex
+zh.LaunchCodex=启动 Codex
+
 [Files]
 Source: "{#MySourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Tasks]
+Name: "skills"; Description: "{cm:TaskSkills}"; Flags: unchecked
+Name: "chromehost"; Description: "{cm:TaskChromeHost}"; Flags: unchecked
+Name: "codexlinks"; Description: "{cm:TaskCodexLinks}"; Flags: unchecked
+Name: "computeruse"; Description: "{cm:TaskComputerUse}"; Flags: unchecked
+Name: "chromeguide"; Description: "{cm:TaskChromeGuide}"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\codex"; ValueType: string; ValueName: ""; ValueData: "URL:Codex Protocol"; Flags: uninsdeletekey; Tasks: codexlinks
+Root: HKCU; Subkey: "Software\Classes\codex"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey; Tasks: codexlinks
+Root: HKCU; Subkey: "Software\Classes\codex\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\_internal\app\Codex.exe"",0"; Flags: uninsdeletekey; Tasks: codexlinks
+Root: HKCU; Subkey: "Software\Classes\codex\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Codex.cmd"" ""%1"""; Flags: uninsdeletekey; Tasks: codexlinks
 
 [InstallDelete]
 Type: files; Name: "{app}\Codex.exe"
@@ -44,4 +76,21 @@ Name: "{autodesktop}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; I
 Name: "{group}\Setup Codex"; Filename: "{app}\Setup Codex.cmd"; IconFilename: "{app}\_internal\app\Codex.exe"
 
 [Run]
-Filename: "{app}\Setup Codex.cmd"; Description: "Set up Codex Offline"; Flags: nowait postinstall skipifsilent shellexec
+Filename: "{app}\Setup Codex.cmd"; Parameters: "{code:GetSetupCodexArgs} -NoLaunch"; Flags: skipifsilent shellexec
+Filename: "{app}\Codex.cmd"; Description: "{cm:LaunchCodex}"; Flags: nowait postinstall skipifsilent shellexec
+
+[Code]
+function GetSetupCodexArgs(Param: String): String;
+begin
+  Result := '-NonInteractive -Language ' + ActiveLanguage;
+  if WizardIsTaskSelected('skills') then
+    Result := Result + ' -InstallSkillSync';
+  if WizardIsTaskSelected('chromehost') then
+    Result := Result + ' -RegisterChromeHost';
+  if WizardIsTaskSelected('codexlinks') then
+    Result := Result + ' -RegisterCodexLinks';
+  if WizardIsTaskSelected('computeruse') then
+    Result := Result + ' -RepairComputerUse';
+  if WizardIsTaskSelected('chromeguide') then
+    Result := Result + ' -OpenChromeGuide';
+end;

@@ -1239,20 +1239,52 @@ if ($config.packaging.setupExe -and -not $SkipInstaller) {
     else {
         $templateFile = Join-Path $repoRoot 'installer/CodexOffline.iss.tpl'
         $issFile = Join-Path $workRoot 'CodexOffline.generated.iss'
-        $template = Get-Content -Path $templateFile -Raw
-        $rendered = $template
-        $rendered = $rendered.Replace('__APP_NAME__', [string]$config.appName)
-        $rendered = $rendered.Replace('__APP_VERSION__', [string]$version)
-        $rendered = $rendered.Replace('__APP_DIR_NAME__', [string]$config.installDirName)
-        $rendered = $rendered.Replace('__SOURCE_ROOT__', [string]$packageRoot.Replace('/', '\\'))
-        $rendered = $rendered.Replace('__OUTPUT_ROOT__', [string]$artifactRoot.Replace('/', '\\'))
-        $rendered = $rendered.Replace('__OUTPUT_BASENAME__', [string]('{0}-setup' -f $releaseBase))
-        $rendered | Set-Content -Path $issFile -Encoding UTF8
-        & $iscc $issFile | Out-Host
 
-        $setupExe = Join-Path $artifactRoot ('{0}-setup.exe' -f $releaseBase)
-        if (Test-Path $setupExe) {
-            $assets.Add($setupExe) | Out-Null
+        $installerSourceRoot = $packageRoot
+        $installerSourceDrive = ''
+        foreach ($drive in @('Z:', 'Y:', 'X:', 'W:', 'V:')) {
+            if (Test-Path -LiteralPath "$drive\") {
+                continue
+            }
+
+            $stageRoot = Split-Path -Parent $packageRoot
+            cmd.exe /c "subst $drive `"$stageRoot`"" | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $installerSourceDrive = $drive
+                $installerSourceRoot = Join-Path $drive (Split-Path -Leaf $packageRoot)
+                Write-BuildTrace "Using short installer source root: $installerSourceRoot"
+                break
+            }
+        }
+
+        try {
+            $template = Get-Content -Path $templateFile -Raw
+            $rendered = $template
+            $rendered = $rendered.Replace('__APP_NAME__', [string]$config.appName)
+            $rendered = $rendered.Replace('__APP_VERSION__', [string]$version)
+            $rendered = $rendered.Replace('__APP_DIR_NAME__', [string]$config.installDirName)
+            $rendered = $rendered.Replace('__SOURCE_ROOT__', [string]$installerSourceRoot.Replace('/', '\\'))
+            $rendered = $rendered.Replace('__INSTALLER_ROOT__', [string](Join-Path $repoRoot 'installer').Replace('/', '\\'))
+            $rendered = $rendered.Replace('__OUTPUT_ROOT__', [string]$artifactRoot.Replace('/', '\\'))
+            $rendered = $rendered.Replace('__OUTPUT_BASENAME__', [string]('{0}-setup' -f $releaseBase))
+            $rendered | Set-Content -Path $issFile -Encoding UTF8
+            & $iscc $issFile | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                throw "Inno Setup failed with exit code $LASTEXITCODE."
+            }
+
+            $setupExe = Join-Path $artifactRoot ('{0}-setup.exe' -f $releaseBase)
+            if (Test-Path $setupExe) {
+                $assets.Add($setupExe) | Out-Null
+            }
+            elseif ($RequireInstaller) {
+                throw "Installer build did not produce expected setup exe: $setupExe"
+            }
+        }
+        finally {
+            if ($installerSourceDrive) {
+                cmd.exe /c "subst $installerSourceDrive /D" | Out-Null
+            }
         }
     }
 }

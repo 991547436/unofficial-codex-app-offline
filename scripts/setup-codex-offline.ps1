@@ -3,11 +3,18 @@ param(
     [string]$InstallRoot = '',
     [string]$CodexHome = '',
     [string]$SkillProfile = '',
+    [switch]$InstallSkillSync,
     [switch]$SkipSkillSync,
+    [switch]$RegisterChromeHost,
+    [switch]$RegisterCodexLinks,
+    [switch]$RepairComputerUse,
+    [switch]$OpenChromeGuide,
     [switch]$SkipChromeGuide,
     [switch]$NoLaunch,
     [switch]$AssumeYes,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [ValidateSet('auto', 'en', 'zh')]
+    [string]$Language = 'auto'
 )
 
 Set-StrictMode -Version Latest
@@ -43,10 +50,222 @@ function Resolve-PackageRoot {
     throw 'Could not resolve the Codex Offline package root.'
 }
 
+$script:SetupLanguage = 'en'
+$script:SetupMessages = @{
+    LanguagePrompt = @{
+        en = 'Choose setup language: [1] 中文  [2] English'
+        zh = '选择安装语言：[1] 中文  [2] English'
+    }
+    LanguageInvalid = @{
+        en = 'Please enter 1 or 2.'
+        zh = '请输入 1 或 2。'
+    }
+    HeaderTitle = @{
+        en = 'Codex Offline Setup'
+        zh = 'Codex 离线版设置'
+    }
+    HeaderBody = @{
+        en = 'This wizard prepares the offline package for first use.'
+        zh = '这个向导会完成首次使用所需的最小设置。'
+    }
+    PackageRoot = @{
+        en = 'Package root'
+        zh = '包目录'
+    }
+    DailyLauncher = @{
+        en = 'Daily launcher'
+        zh = '日常启动器'
+    }
+    StartSetupPrompt = @{
+        en = 'Start setup now?'
+        zh = '现在开始设置吗？'
+    }
+    SetupCanceled = @{
+        en = 'Setup canceled.'
+        zh = '已取消设置。'
+    }
+    AnswerYesNo = @{
+        en = 'Please answer y or n.'
+        zh = '请输入 y 或 n。'
+    }
+    StepSkills = @{
+        en = 'Optional offline skills'
+        zh = '可选离线技能'
+    }
+    SkippedBySwitch = @{
+        en = 'Skipped by switch.'
+        zh = '已按参数跳过。'
+    }
+    InstallSkillsPrompt = @{
+        en = 'Install the default offline skills profile now?'
+        zh = '现在安装默认离线技能配置吗？'
+    }
+    SkillsSkipped = @{
+        en = 'Skill installation skipped. You can install skills later in Codex.'
+        zh = '已跳过技能安装。之后可以在 Codex 里自行安装。'
+    }
+    StepChromeHost = @{
+        en = 'Optional Chrome native host'
+        zh = '可选 Chrome 本机桥接'
+    }
+    ChromeHostPrompt = @{
+        en = 'Register or repair @chrome native host access now?'
+        zh = '现在注册或修复 @chrome 本机桥接吗？'
+    }
+    ChromeHostSkipped = @{
+        en = 'Chrome native host repair skipped. You can run Repair Chrome Host later.'
+        zh = '已跳过 Chrome 本机桥接修复。之后可以运行 Repair Chrome Host。'
+    }
+    StepLinks = @{
+        en = 'Register codex:// app links'
+        zh = '注册 codex:// 应用链接'
+    }
+    LinksPrompt = @{
+        en = 'Register codex:// links so CLI /app can open this package?'
+        zh = '注册 codex:// 链接，让 CLI /app 可以打开这个离线包吗？'
+    }
+    LinksRegistered = @{
+        en = 'codex:// links now open this Codex Offline package.'
+        zh = 'codex:// 链接现在会打开这个 Codex 离线包。'
+    }
+    LinksSkipped = @{
+        en = 'codex:// registration skipped. CLI /app will use whichever Codex handler is already registered.'
+        zh = '已跳过 codex:// 注册。CLI /app 会使用系统当前已有的 Codex 处理程序。'
+    }
+    StepComputerUse = @{
+        en = 'Optional Computer Use plugin repair'
+        zh = '可选 Computer Use 插件修复'
+    }
+    ComputerUsePrompt = @{
+        en = 'Repair Computer Use plugin layout now?'
+        zh = '现在修复 Computer Use 插件布局吗？'
+    }
+    ComputerUseRepaired = @{
+        en = 'Computer Use plugin layout repaired ({0}).'
+        zh = '已修复 Computer Use 插件布局（{0}）。'
+    }
+    ComputerUseOk = @{
+        en = 'Computer Use plugin layout already looks correct.'
+        zh = 'Computer Use 插件布局看起来已经正确。'
+    }
+    ComputerUseSkipped = @{
+        en = 'Computer Use plugin repair skipped. You can install or repair it later in Codex.'
+        zh = '已跳过 Computer Use 插件修复。之后可以在 Codex 里安装或修复。'
+    }
+    DailyLauncherMessage = @{
+        en = "Daily launcher:`n{0}"
+        zh = "日常启动器：`n{0}"
+    }
+    AppLauncherMessage = @{
+        en = "Codex can be opened from:`n{0}"
+        zh = "可以从这里打开 Codex：`n{0}"
+    }
+    StepChromeExtension = @{
+        en = 'Optional Chrome extension'
+        zh = '可选 Chrome 扩展'
+    }
+    ChromeExtensionNeed = @{
+        en = 'For @chrome, Chrome must have the bundled extension loaded.'
+        zh = '如需使用 @chrome，需要在 Chrome 中加载随包扩展。'
+    }
+    ExtensionPath = @{
+        en = 'Extension path'
+        zh = '扩展路径'
+    }
+    OpenChromePrompt = @{
+        en = 'Open chrome://extensions now?'
+        zh = '现在打开 chrome://extensions 吗？'
+    }
+    ChromeInstructions = @{
+        en = 'In Chrome: enable Developer mode, choose Load unpacked, and select the extension path above.'
+        zh = '在 Chrome 中：开启开发者模式，选择“加载已解压的扩展程序”，并选择上面的扩展路径。'
+    }
+    ChromeContinuePrompt = @{
+        en = 'Press Enter after loading the extension, or press Enter to continue without it.'
+        zh = '加载扩展后按 Enter；或直接按 Enter 跳过。'
+    }
+    ChromePageSkipped = @{
+        en = 'Chrome extension page skipped. You can load the extension later from the path above.'
+        zh = '已跳过 Chrome 扩展页面。之后可以从上面的路径手动加载。'
+    }
+    ChromeGuideSkipped = @{
+        en = 'Skipped by -SkipChromeGuide.'
+        zh = '已按 -SkipChromeGuide 跳过。'
+    }
+    ChromeExtensionMissing = @{
+        en = 'Bundled Chrome extension was not found: {0}'
+        zh = '未找到随包 Chrome 扩展：{0}'
+    }
+    StepFinish = @{
+        en = 'Finish'
+        zh = '完成'
+    }
+    SetupComplete = @{
+        en = 'Setup is complete.'
+        zh = '设置已完成。'
+    }
+    AfterSetup = @{
+        en = 'After this first setup, open Codex.cmd directly.'
+        zh = '首次设置完成后，日常直接打开 Codex.cmd 即可。'
+    }
+    LaunchPrompt = @{
+        en = 'Launch Codex now?'
+        zh = '现在启动 Codex 吗？'
+    }
+    LaunchSkipped = @{
+        en = 'Launch skipped by -NoLaunch.'
+        zh = '已按 -NoLaunch 跳过启动。'
+    }
+}
+
+function Get-SetupText {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    $entry = $script:SetupMessages[$Key]
+    if ($null -eq $entry) {
+        return $Key
+    }
+
+    return $entry[$script:SetupLanguage]
+}
+
+function Resolve-SetupLanguage {
+    if ($Language -eq 'zh' -or $Language -eq 'en') {
+        return $Language
+    }
+
+    if ([System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'zh') {
+        return 'zh'
+    }
+
+    return 'en'
+}
+
+function Read-SetupLanguage {
+    $defaultLanguage = Resolve-SetupLanguage
+    if ($AssumeYes -or $NonInteractive) {
+        return $defaultLanguage
+    }
+
+    while ($true) {
+        $suffix = if ($defaultLanguage -eq 'zh') { '[1]' } else { '[2]' }
+        $answer = Read-Host "$($script:SetupMessages.LanguagePrompt[$defaultLanguage]) $suffix"
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $defaultLanguage
+        }
+
+        switch ($answer.Trim().ToLowerInvariant()) {
+            { $_ -in @('1', 'zh', 'cn', 'chinese', '中文') } { return 'zh' }
+            { $_ -in @('2', 'en', 'english') } { return 'en' }
+            default { Write-Host $script:SetupMessages.LanguageInvalid[$defaultLanguage] -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Write-SetupHeader {
     Write-Host ''
-    Write-Host 'Codex Offline Setup' -ForegroundColor Cyan
-    Write-Host 'This interactive wizard prepares the offline package for first use.' -ForegroundColor Gray
+    Write-Host (Get-SetupText 'HeaderTitle') -ForegroundColor Cyan
+    Write-Host (Get-SetupText 'HeaderBody') -ForegroundColor Gray
     Write-Host ''
 }
 
@@ -84,7 +303,7 @@ function Read-SetupYesNo {
         switch ($answer.Trim().ToLowerInvariant()) {
             { $_ -in @('y', 'yes') } { return $true }
             { $_ -in @('n', 'no') } { return $false }
-            default { Write-Host 'Please answer y or n.' -ForegroundColor Yellow }
+            default { Write-Host (Get-SetupText 'AnswerYesNo') -ForegroundColor Yellow }
         }
     }
 }
@@ -105,6 +324,25 @@ function Open-ChromeExtensionsPage {
     }
 
     Start-Process 'chrome://extensions/'
+}
+
+function Register-CodexUrlProtocol {
+    param([Parameter(Mandatory = $true)][string]$LauncherPath)
+
+    if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) {
+        throw "Codex launcher was not found: $LauncherPath"
+    }
+
+    $protocolRoot = 'HKCU:\Software\Classes\codex'
+    $iconRoot = Join-Path $protocolRoot 'DefaultIcon'
+    $commandRoot = Join-Path $protocolRoot 'shell\open\command'
+    New-Item -Path $protocolRoot -Force | Out-Null
+    New-Item -Path $iconRoot -Force | Out-Null
+    New-Item -Path $commandRoot -Force | Out-Null
+    Set-Item -Path $protocolRoot -Value 'URL:Codex Protocol'
+    New-ItemProperty -Path $protocolRoot -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+    Set-Item -Path $iconRoot -Value "`"$appLauncher`",0"
+    Set-Item -Path $commandRoot -Value "`"$LauncherPath`" `"%1`""
 }
 
 function Repair-EncodedScopedNodeModules {
@@ -321,22 +559,23 @@ if (-not (Test-Path -LiteralPath $repairChromeHostScript -PathType Leaf)) {
     throw "Chrome host repair script was not found: $repairChromeHostScript"
 }
 
+$script:SetupLanguage = Read-SetupLanguage
 Write-SetupHeader
-Write-Host "Package root: $packageRoot"
-Write-Host "Daily launcher: $dailyLauncher"
+Write-Host ("{0}: {1}" -f (Get-SetupText 'PackageRoot'), $packageRoot)
+Write-Host ("{0}: {1}" -f (Get-SetupText 'DailyLauncher'), $dailyLauncher)
 Write-Host ''
 
-$setupStarted = Read-SetupYesNo -Prompt 'Start setup now?' -DefaultYes $true
+$setupStarted = Read-SetupYesNo -Prompt (Get-SetupText 'StartSetupPrompt') -DefaultYes $true
 if (-not $setupStarted) {
-    Write-Host 'Setup canceled.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'SetupCanceled') -ForegroundColor Yellow
     exit 0
 }
 
-Write-SetupStep -Number 1 -Title 'Install default offline skills'
+Write-SetupStep -Number 1 -Title (Get-SetupText 'StepSkills')
 if ($SkipSkillSync) {
-    Write-Host 'Skipped by -SkipSkillSync.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'SkippedBySwitch') -ForegroundColor Yellow
 }
-elseif (Read-SetupYesNo -Prompt 'Install the default offline skills profile now?' -DefaultYes $true) {
+elseif ($InstallSkillSync -or (Read-SetupYesNo -Prompt (Get-SetupText 'InstallSkillsPrompt') -DefaultYes $false)) {
     $bootstrapArgs = @{
         InstallRoot = $internalRoot
         NoLaunch = $true
@@ -352,60 +591,74 @@ elseif (Read-SetupYesNo -Prompt 'Install the default offline skills profile now?
     & $bootstrapScript @bootstrapArgs
 }
 else {
-    Write-Host 'Skill installation skipped.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'SkillsSkipped') -ForegroundColor Yellow
 }
 
-Write-SetupStep -Number 2 -Title 'Register Chrome native host'
-if (Read-SetupYesNo -Prompt 'Register or repair @chrome native host access now?' -DefaultYes $true) {
+Write-SetupStep -Number 2 -Title (Get-SetupText 'StepChromeHost')
+if ($RegisterChromeHost -or (Read-SetupYesNo -Prompt (Get-SetupText 'ChromeHostPrompt') -DefaultYes $false)) {
     & $repairChromeHostScript -InstallRoot $packageRoot
 }
 else {
-    Write-Host 'Chrome native host repair skipped.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'ChromeHostSkipped') -ForegroundColor Yellow
 }
 
-Write-SetupStep -Number 3 -Title 'Repair Computer Use plugin layout'
-$computerUseRepairCount = Repair-ComputerUsePluginLayout -PackageRoot $packageRoot -CodexHomePath $resolvedCodexHome
-if ($computerUseRepairCount -gt 0) {
-    Write-Host "Computer Use plugin layout repaired ($computerUseRepairCount)." -ForegroundColor Green
+Write-SetupStep -Number 3 -Title (Get-SetupText 'StepLinks')
+if ($RegisterCodexLinks -or (Read-SetupYesNo -Prompt (Get-SetupText 'LinksPrompt') -DefaultYes $false)) {
+    Register-CodexUrlProtocol -LauncherPath $dailyLauncher
+    Write-Host (Get-SetupText 'LinksRegistered') -ForegroundColor Green
 }
 else {
-    Write-Host 'Computer Use plugin layout already looks correct.' -ForegroundColor Green
+    Write-Host (Get-SetupText 'LinksSkipped') -ForegroundColor Yellow
+}
+
+Write-SetupStep -Number 4 -Title (Get-SetupText 'StepComputerUse')
+if ($RepairComputerUse -or (Read-SetupYesNo -Prompt (Get-SetupText 'ComputerUsePrompt') -DefaultYes $false)) {
+    $computerUseRepairCount = Repair-ComputerUsePluginLayout -PackageRoot $packageRoot -CodexHomePath $resolvedCodexHome
+    if ($computerUseRepairCount -gt 0) {
+        Write-Host ((Get-SetupText 'ComputerUseRepaired') -f $computerUseRepairCount) -ForegroundColor Green
+    }
+    else {
+        Write-Host (Get-SetupText 'ComputerUseOk') -ForegroundColor Green
+    }
+}
+else {
+    Write-Host (Get-SetupText 'ComputerUseSkipped') -ForegroundColor Yellow
 }
 
 $dailyLauncherMessage = if (Test-Path -LiteralPath $dailyLauncher -PathType Leaf) {
-    "Daily launcher:`n$dailyLauncher"
+    (Get-SetupText 'DailyLauncherMessage') -f $dailyLauncher
 }
 else {
-    "Codex can be opened from:`n$appLauncher"
+    (Get-SetupText 'AppLauncherMessage') -f $appLauncher
 }
 
-Write-SetupStep -Number 4 -Title 'Load Chrome extension'
+Write-SetupStep -Number 5 -Title (Get-SetupText 'StepChromeExtension')
 if (-not $SkipChromeGuide -and (Test-Path -LiteralPath $unpackedExtensionPath -PathType Container)) {
-    Write-Host 'For @chrome, Chrome must have the bundled extension loaded.'
-    Write-Host "Extension path: $unpackedExtensionPath" -ForegroundColor Green
-    if (Read-SetupYesNo -Prompt 'Open chrome://extensions now?' -DefaultYes $true) {
+    Write-Host (Get-SetupText 'ChromeExtensionNeed')
+    Write-Host ("{0}: {1}" -f (Get-SetupText 'ExtensionPath'), $unpackedExtensionPath) -ForegroundColor Green
+    if ($OpenChromeGuide -or (Read-SetupYesNo -Prompt (Get-SetupText 'OpenChromePrompt') -DefaultYes $false)) {
         Open-ChromeExtensionsPage
         Write-Host ''
-        Write-Host 'In Chrome: enable Developer mode, choose Load unpacked, and select the extension path above.' -ForegroundColor Yellow
-        Wait-SetupContinue -Prompt 'Press Enter after loading the extension, or press Enter to continue without it.'
+        Write-Host (Get-SetupText 'ChromeInstructions') -ForegroundColor Yellow
+        Wait-SetupContinue -Prompt (Get-SetupText 'ChromeContinuePrompt')
     }
     else {
-        Write-Host 'Chrome extension page skipped. You can load the extension later from the path above.' -ForegroundColor Yellow
+        Write-Host (Get-SetupText 'ChromePageSkipped') -ForegroundColor Yellow
     }
 }
 elseif ($SkipChromeGuide) {
-    Write-Host 'Skipped by -SkipChromeGuide.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'ChromeGuideSkipped') -ForegroundColor Yellow
 }
 else {
-    Write-Host "Bundled Chrome extension was not found: $unpackedExtensionPath" -ForegroundColor Yellow
+    Write-Host ((Get-SetupText 'ChromeExtensionMissing') -f $unpackedExtensionPath) -ForegroundColor Yellow
 }
 
-Write-SetupStep -Number 5 -Title 'Finish'
-Write-Host 'Setup is complete.' -ForegroundColor Green
+Write-SetupStep -Number 6 -Title (Get-SetupText 'StepFinish')
+Write-Host (Get-SetupText 'SetupComplete') -ForegroundColor Green
 Write-Host $dailyLauncherMessage
-Write-Host 'After this first setup, open Codex.cmd directly.'
+Write-Host (Get-SetupText 'AfterSetup')
 
-if (-not $NoLaunch -and (Read-SetupYesNo -Prompt 'Launch Codex now?' -DefaultYes $true)) {
+if (-not $NoLaunch -and (Read-SetupYesNo -Prompt (Get-SetupText 'LaunchPrompt') -DefaultYes $true)) {
     if (Test-Path -LiteralPath $dailyLauncher -PathType Leaf) {
         Start-Process -FilePath $dailyLauncher -WorkingDirectory $packageRoot
     }
@@ -414,5 +667,5 @@ if (-not $NoLaunch -and (Read-SetupYesNo -Prompt 'Launch Codex now?' -DefaultYes
     }
 }
 elseif ($NoLaunch) {
-    Write-Host 'Launch skipped by -NoLaunch.' -ForegroundColor Yellow
+    Write-Host (Get-SetupText 'LaunchSkipped') -ForegroundColor Yellow
 }
