@@ -1127,6 +1127,8 @@ const ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:archived-threads-partial-list*/');
 const ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:archived-threads-cache-fallback*/');
+const ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:archived-settings-offline-local-visibility*/');
 const FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:feature-overrides-preserve-mcp-config*/');
 const FEATURE_ENABLEMENT_PRESERVE_UNIFIED_EXEC_PATCH_MARKER =
@@ -1241,6 +1243,7 @@ let computerUseNodeReplDynamicToolCallPatched = false;
 let archivedThreadsPartialListPatched = false;
 let archivedThreadsCacheFallbackPatched = false;
 let archivedThreadsStateDbOnlyPatched = false;
+let archivedSettingsOfflineLocalVisibilityPatched = false;
 let featureOverridesPreserveMcpConfigPatched = false;
 let featureEnablementPreserveUnifiedExecPatched = false;
 let bundledPluginCacheLockNonfatalPatched = false;
@@ -1343,6 +1346,10 @@ for (const entry of javaScriptEntries) {
   archivedThreadsStateDbOnlyPatched ||=
     content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER) &&
     /useStateDbOnly:[A-Za-z_$][\w$]*\?!0:[A-Za-z_$][\w$]*/.test(content);
+  archivedSettingsOfflineLocalVisibilityPatched ||=
+    content.includes(ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER) &&
+    content.includes('archivedChats:') &&
+    /=[A-Za-z_$][\w$]*\/\*codex-offline:archived-settings-offline-local-visibility\*\//.test(content);
   featureOverridesPreserveMcpConfigPatched ||=
     content.includes(FEATURE_OVERRIDES_PRESERVE_MCP_CONFIG_PATCH_MARKER) &&
     content.includes('`features.unified_exec`]=!0') &&
@@ -1545,6 +1552,9 @@ if (!archivedThreadsCacheFallbackPatched) {
 }
 if (!archivedThreadsStateDbOnlyPatched) {
   throw new Error('Archived thread list does not force useStateDbOnly for archived queries.');
+}
+if (!archivedSettingsOfflineLocalVisibilityPatched) {
+  throw new Error('Archived settings panel still hides local archived chats when the cloud tasks query fails offline.');
 }
 if (codexMobileRemoteControlMfaEndpointSeen && !codexMobileAuthReloginPatched) {
   info('Codex Mobile remote-control auth relogin is a legacy renderer patch outside the current Computer Use gate.');

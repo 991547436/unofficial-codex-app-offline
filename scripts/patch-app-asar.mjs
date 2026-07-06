@@ -1622,6 +1622,8 @@ try {
     contractPatchMarker('/*codex-offline:archived-threads-partial-list*/');
   const ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER =
     contractPatchMarker('/*codex-offline:archived-threads-cache-fallback*/');
+  const ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER =
+    contractPatchMarker('/*codex-offline:archived-settings-offline-local-visibility*/');
   const COMPUTER_USE_INPUT_MENTION_HELPER =
     'function _codexOfflineComputerUseMentionItems(e){let t=typeof e==`string`?e.trimStart():``;' +
     'let n=t.match(/\\[(@?(?:[^\\]]+))\\]\\((plugin:\\/\\/computer-use(?:@[^)]+)?)\\)/),' +
@@ -2279,6 +2281,47 @@ try {
         },
       );
     }
+    return { content: next, alreadyCorrect: false, patched: next !== content };
+  }
+  // The archived settings panel (Settings → Data controls → Archived) combines
+  // the LOCAL archived-thread query error with a CLOUD tasks query error into a
+  // single isError prop: `<isErr>=<localErr>||<cloudData>==null&&<cloudErr>`. The
+  // cloud query hits /wham/tasks/list, so while OFFLINE it always fails, forcing
+  // the whole panel into its error state and hiding the perfectly good local
+  // archived conversations. Drop the cloud term so local archived chats still
+  // render offline; a genuine local query failure (localErr) still shows the
+  // error state. Root cause of issue #55's "archived disappears when offline".
+  function patchArchivedSettingsOfflineVisibility(content) {
+    if (content.includes(ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER)) {
+      return { content, alreadyCorrect: true, patched: false };
+    }
+
+    const archivedPanelAnchor = content.indexOf('archivedChats:');
+    if (archivedPanelAnchor < 0) {
+      return { content, alreadyCorrect: false, patched: false };
+    }
+    // Prop keys (archivedChats … isError … onLoadNextPage) are stable component
+    // prop names; the isError value is a minified local we capture and rewrite.
+    const isErrorPropMatch = content
+      .slice(archivedPanelAnchor, archivedPanelAnchor + 400)
+      .match(/isError:([A-Za-z_$][\w$]*),onLoadNextPage:/);
+    if (!isErrorPropMatch) {
+      return { content, alreadyCorrect: false, patched: false };
+    }
+    const isErrorVar = isErrorPropMatch[1];
+    const combinedErrorRe = new RegExp(
+      '(^|[^\\w$])(' + isErrorVar + ')=([A-Za-z_$][\\w$]*)\\|\\|' +
+        '[A-Za-z_$][\\w$]*==null&&[A-Za-z_$][\\w$]*(?=[,;)])',
+    );
+    if (!combinedErrorRe.test(content)) {
+      return { content, alreadyCorrect: false, patched: false };
+    }
+    const next = content.replace(
+      combinedErrorRe,
+      (_match, prefix, errorVar, localErrorVar) =>
+        `${prefix}${errorVar}=${localErrorVar}` +
+        ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER,
+    );
     return { content: next, alreadyCorrect: false, patched: next !== content };
   }
   const COMPUTER_USE_NODE_REPL_DYNAMIC_TOOL_CALL_LEGACY_RE =
@@ -3486,9 +3529,11 @@ try {
     const computerUseNodeReplDynamicToolPatchedFiles = [];
     const computerUseNodeReplDynamicToolCallPatchedFiles = [];
     const archivedThreadsPartialListPatchedFiles = [];
+    const archivedSettingsOfflineVisibilityPatchedFiles = [];
     let computerUseNodeReplDynamicToolAlreadyCorrect = false;
     let computerUseNodeReplDynamicToolCallAlreadyCorrect = false;
     let archivedThreadsPartialListAlreadyCorrect = false;
+    let archivedSettingsOfflineVisibilityAlreadyCorrect = false;
 
     for (const filePath of webviewJsFiles) {
       let content = fs.readFileSync(filePath, 'utf8');
@@ -3521,6 +3566,16 @@ try {
         changed = true;
       } else if (archivedThreadsPartialListPatch.alreadyCorrect) {
         archivedThreadsPartialListAlreadyCorrect = true;
+      }
+
+      const archivedSettingsOfflineVisibilityPatch =
+        patchArchivedSettingsOfflineVisibility(content);
+      if (archivedSettingsOfflineVisibilityPatch.patched) {
+        content = archivedSettingsOfflineVisibilityPatch.content;
+        archivedSettingsOfflineVisibilityPatchedFiles.push(path.relative(tmpDir, filePath));
+        changed = true;
+      } else if (archivedSettingsOfflineVisibilityPatch.alreadyCorrect) {
+        archivedSettingsOfflineVisibilityAlreadyCorrect = true;
       }
 
       const rendererKnownStatsigGatePatch = patchDirectStatsigGateCalls(
@@ -3628,6 +3683,17 @@ try {
     } else {
       throw new Error(
         'Could not locate renderer archived thread list pagination to patch.',
+      );
+    }
+    if (archivedSettingsOfflineVisibilityPatchedFiles.length > 0) {
+      log('Archived settings offline local visibility patched in ' +
+        `${archivedSettingsOfflineVisibilityPatchedFiles.join(', ')}.`);
+    } else if (archivedSettingsOfflineVisibilityAlreadyCorrect) {
+      log('Archived settings offline local visibility already patched.');
+    } else {
+      throw new Error(
+        'Could not locate archived settings panel isError to keep local ' +
+        'archived chats visible offline.',
       );
     }
   }
