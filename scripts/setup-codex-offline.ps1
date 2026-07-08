@@ -9,6 +9,7 @@ param(
     [switch]$RegisterCodexLinks,
     [switch]$InstallAppShim,
     [switch]$RemoveAppShim,
+    [switch]$RepairThreads,
     [switch]$RepairComputerUse,
     [switch]$OpenChromeGuide,
     [switch]$SkipChromeGuide,
@@ -175,6 +176,36 @@ Install the shim?
     AppShimSourceMissing = @{
         en = 'PowerShell shim source files not found in this package; skipping.'
         zh = '未在包内找到 PowerShell shim 源文件，已跳过。'
+    }
+    StepRepairThreads = @{
+        en = 'Detect and repair missing threads'
+        zh = '检测并修复丢失的历史会话'
+    }
+    RepairThreadsPrompt = @{
+        en = @"
+Scan local session files and import any threads missing from the Desktop
+database? This is useful after switching model providers or migrating
+from another installation. No data is deleted; missing threads are added.
+Run the repair?
+"@
+        zh = @"
+扫描本地会话文件，将 Desktop 数据库中缺失的会话导入？
+切换过 provider 或从其他安装迁移后可能会出现会话丢失。
+此操作不会删除任何数据，只会补全缺失的会话。
+执行修复吗？
+"@
+    }
+    RepairThreadsComplete = @{
+        en = 'Thread repair complete.'
+        zh = '会话修复完成。'
+    }
+    RepairThreadsNone = @{
+        en = 'No missing threads found; nothing to repair.'
+        zh = '未发现缺失的会话，无需修复。'
+    }
+    RepairThreadsSkipped = @{
+        en = 'Thread repair skipped.'
+        zh = '已跳过会话修复。'
     }
     StepComputerUse = @{
         en = 'Optional Computer Use plugin repair'
@@ -717,7 +748,23 @@ else {
     Write-Host (Get-SetupText 'AppShimSkipped') -ForegroundColor Yellow
 }
 
-Write-SetupStep -Number 5 -Title (Get-SetupText 'StepComputerUse')
+Write-SetupStep -Number 5 -Title (Get-SetupText 'StepRepairThreads')
+if ($RepairThreads -or (Read-SetupYesNo -Prompt (Get-SetupText 'RepairThreadsPrompt') -DefaultYes $false)) {
+    $repairScript = Join-Path $packageRoot '_internal\powershell-shim\CodexOfflineShim\repair-threads.js'
+    if (Test-Path -LiteralPath $repairScript -PathType Leaf) {
+        $repairOutput = & node $repairScript 2>&1
+        $repairOutput | ForEach-Object { Write-Host $_ }
+        Write-Host (Get-SetupText 'RepairThreadsComplete') -ForegroundColor Green
+    }
+    else {
+        Write-Host (Get-SetupText 'RepairThreadsNone') -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host (Get-SetupText 'RepairThreadsSkipped') -ForegroundColor Yellow
+}
+
+Write-SetupStep -Number 6 -Title (Get-SetupText 'StepComputerUse')
 if ($RepairComputerUse -or (Read-SetupYesNo -Prompt (Get-SetupText 'ComputerUsePrompt') -DefaultYes $false)) {
     $computerUseRepairCount = Repair-ComputerUsePluginLayout -PackageRoot $packageRoot -CodexHomePath $resolvedCodexHome
     if ($computerUseRepairCount -gt 0) {
@@ -738,7 +785,7 @@ else {
     (Get-SetupText 'AppLauncherMessage') -f $appLauncher
 }
 
-Write-SetupStep -Number 6 -Title (Get-SetupText 'StepChromeExtension')
+Write-SetupStep -Number 7 -Title (Get-SetupText 'StepChromeExtension')
 if (-not $SkipChromeGuide -and (Test-Path -LiteralPath $unpackedExtensionPath -PathType Container)) {
     Write-Host (Get-SetupText 'ChromeExtensionNeed')
     Write-Host ("{0}: {1}" -f (Get-SetupText 'ExtensionPath'), $unpackedExtensionPath) -ForegroundColor Green
@@ -759,7 +806,7 @@ else {
     Write-Host ((Get-SetupText 'ChromeExtensionMissing') -f $unpackedExtensionPath) -ForegroundColor Yellow
 }
 
-Write-SetupStep -Number 7 -Title (Get-SetupText 'StepFinish')
+Write-SetupStep -Number 8 -Title (Get-SetupText 'StepFinish')
 Write-Host (Get-SetupText 'SetupComplete') -ForegroundColor Green
 Write-Host $dailyLauncherMessage
 Write-Host (Get-SetupText 'AfterSetup')

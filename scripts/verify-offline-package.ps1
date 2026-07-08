@@ -288,7 +288,8 @@ try {
         '_internal\app\patches\init.cjs',
         '_internal\powershell-shim\CodexOfflineShim\CodexOfflineShim.psd1',
         '_internal\powershell-shim\CodexOfflineShim\CodexOfflineShim.psm1',
-        '_internal\powershell-shim\CodexOfflineShim\sync-thread.js'
+        '_internal\powershell-shim\CodexOfflineShim\sync-thread.js',
+        '_internal\powershell-shim\CodexOfflineShim\repair-threads.js'
     )
 
     foreach ($relativePath in $requiredPortableFiles) {
