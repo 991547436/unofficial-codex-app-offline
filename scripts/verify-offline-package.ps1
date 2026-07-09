@@ -1094,10 +1094,10 @@ const LOCALE_SOURCE_BAD_PATTERN = '.get(`locale_source`,`IDE`)';
 const WEBVIEW_BROKEN_BOOLEAN_PATCH_RE =
   /(?:^|[^\w$])(?!(?:return|throw|case)\b)[A-Za-z_$][\w$]*!0(?=[?),;])/;
 
-const SLASH_UI_MARKERS = [
-  'composer.slashCommands.dialogTitle',
-  'composer.personalitySlashCommand.title',
-  'composer.planSlashCommand.title',
+const SLASH_UI_MARKER_GROUPS = [
+  ['composer.slashCommands.dialogTitle'],
+  ['composer.personalitySlashCommand.title', 'composer.personalitySlashCommand.label'],
+  ['composer.planSlashCommand.title'],
 ];
 const CODEX_MOBILE_REMOTE_CONTROL_MFA_ENDPOINT = '/wham/remote/control/mfa_requirement';
 const CODEX_MOBILE_AUTH_RELOGIN_MARKER = requiredPatchMarker('/*codex-offline:codex-mobile-auth-relogin*/');
@@ -1451,7 +1451,9 @@ if (!webviewEntry) {
   throw new Error('Could not locate the webview index bundle inside app.asar.');
 }
 
-const missingSlashUiMarkers = SLASH_UI_MARKERS.filter(marker => !allJavaScriptContent.some(content => content.includes(marker)));
+const missingSlashUiMarkers = SLASH_UI_MARKER_GROUPS
+  .filter(markers => !allJavaScriptContent.some(content => markers.some(marker => content.includes(marker))))
+  .map(markers => markers.join(' or '));
 if (missingSlashUiMarkers.length > 0) {
   throw new Error(`Slash command UI markers are missing from app.asar JavaScript bundles: ${missingSlashUiMarkers.join(', ')}`);
 }
