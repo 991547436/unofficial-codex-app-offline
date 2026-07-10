@@ -9,7 +9,7 @@ const internalRoot = path.resolve(webRoot, "..");
 const packageRoot = path.resolve(internalRoot, "..");
 const appRoot = path.join(internalRoot, "app");
 const appAsarPath = path.join(appRoot, "resources", "app.asar");
-const codexExePath = path.join(appRoot, process.platform === "win32" ? "Codex.exe" : "Codex");
+const codexExePath = path.join(appRoot, process.platform === "win32" ? "ChatGPT.exe" : "ChatGPT");
 const codexAppServerPath = path.join(
   appRoot,
   "resources",

@@ -126,7 +126,7 @@
  * Usage:
  *   node scripts/patch-app-asar.mjs --app-dir <path-to-app-dir>
  *
- * <path-to-app-dir> is the directory that contains Codex.exe (i.e. the "app"
+ * <path-to-app-dir> is the directory that contains ChatGPT.exe (i.e. the "app"
  * subdirectory of the extracted source package).  The script expects to find
  * resources/app.asar inside it.
  *
@@ -156,6 +156,9 @@ const {
 } = require('../web-gateway/gateway/src/ipc/codex/capabilityContractData.cjs');
 
 const DESKTOP_ASAR_PATCH_MARKER_SET = new Set(DESKTOP_ASAR_PATCH_MARKERS);
+
+// The Electron binary the MSIX manifest declares as its entry point.
+const MAIN_EXECUTABLE_NAME = 'ChatGPT.exe';
 
 function contractPatchMarker(marker) {
   if (!DESKTOP_ASAR_PATCH_MARKER_SET.has(marker)) {
@@ -3787,7 +3790,10 @@ try {
 
   // Disable asar integrity validation fuse in the Electron binary so it
   // accepts the modified asar without crashing on hash mismatch.
-  const exePath = path.resolve(appDir, 'Codex.exe');
+  const exePath = path.resolve(appDir, MAIN_EXECUTABLE_NAME);
+  if (!fs.existsSync(exePath)) {
+    throw new Error(`Electron main executable was not found: ${exePath}`);
+  }
   log(`Flipping asar integrity fuse in ${path.basename(exePath)}…`);
   try {
     await flipFuses(exePath, {
@@ -3801,7 +3807,7 @@ try {
     }
 
     log(
-      'Current Codex.exe does not expose the Electron asar integrity fuse; ' +
+      `Current ${MAIN_EXECUTABLE_NAME} does not expose the Electron asar integrity fuse; ` +
       'no fuse flip needed.',
     );
   }

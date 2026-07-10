@@ -54,7 +54,7 @@ function Get-AppxPackage {
     $installDir = Split-Path -Parent $codexCmd        # e.g. C:\Users\X\Codex
     $internal   = Join-Path $installDir '_internal'   # e.g. C:\Users\X\Codex\_internal
 
-    $exe  = Join-Path $internal 'app\Codex.exe'
+    $exe  = Join-Path $internal 'app\ChatGPT.exe'
     $asar = Join-Path $internal 'app\resources\app.asar'
 
     if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $asar)) {

@@ -335,7 +335,7 @@ if (-not [System.Environment]::GetEnvironmentVariable('CODEX_SKILL_SOURCE_DIR'))
 $stateRoot = Join-Path $resolvedCodexHome '.offline-package'
 $statePath = Join-Path $stateRoot 'skills-manifest.json'
 $targetSkillsRoot = Join-Path $resolvedCodexHome 'skills'
-$launcherPath = Join-Path $resolvedInstallRoot 'app/Codex.exe'
+$launcherPath = Join-Path $resolvedInstallRoot 'app/ChatGPT.exe'
 $currentState = $null
 $manifestToSync = $null
 

@@ -14,8 +14,8 @@ const timeoutMs = Number(args.timeoutMs ?? 420_000);
 const debugPort = Number(args.debugPort ?? 9387);
 const codexHome = args.codexHome ? path.resolve(args.codexHome) : process.env.CODEX_HOME;
 
-if (!appRoot || !fs.existsSync(path.join(appRoot, 'Codex.exe'))) {
-  throw new Error(`Codex.exe was not found under app root: ${appRoot}`);
+if (!appRoot || !fs.existsSync(path.join(appRoot, 'ChatGPT.exe'))) {
+  throw new Error(`ChatGPT.exe was not found under app root: ${appRoot}`);
 }
 
 fs.rmSync(workRoot, { force: true, recursive: true });
@@ -31,7 +31,7 @@ const userDataPath = path.join(workRoot, 'user-data');
 
 const out = fs.openSync(stdoutPath, 'w');
 const err = fs.openSync(stderrPath, 'w');
-const appProcess = spawn(path.join(appRoot, 'Codex.exe'), [
+const appProcess = spawn(path.join(appRoot, 'ChatGPT.exe'), [
   `--user-data-dir=${userDataPath}`,
   `--remote-debugging-port=${debugPort}`,
 ], {
@@ -149,10 +149,10 @@ function parseArgs(argv) {
 
 function resolveAppRoot(input) {
   const root = path.resolve(input ?? '');
-  if (fs.existsSync(path.join(root, 'Codex.exe'))) return root;
+  if (fs.existsSync(path.join(root, 'ChatGPT.exe'))) return root;
 
   const packagedAppRoot = path.join(root, '_internal', 'app');
-  if (fs.existsSync(path.join(packagedAppRoot, 'Codex.exe'))) return packagedAppRoot;
+  if (fs.existsSync(path.join(packagedAppRoot, 'ChatGPT.exe'))) return packagedAppRoot;
 
   return root;
 }

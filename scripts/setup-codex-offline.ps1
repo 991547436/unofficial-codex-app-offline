@@ -43,7 +43,7 @@ function Resolve-PackageRoot {
 
     foreach ($candidate in $candidates) {
         if (
-            (Test-Path -LiteralPath (Join-Path $candidate '_internal\app\Codex.exe') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate '_internal\app\ChatGPT.exe') -PathType Leaf) -and
             (Test-Path -LiteralPath (Join-Path $candidate '_internal\bootstrap-codex-skills.ps1') -PathType Leaf)
         ) {
             return $candidate
@@ -667,7 +667,7 @@ $internalRoot = Join-Path $packageRoot '_internal'
 $bootstrapScript = Join-Path $internalRoot 'bootstrap-codex-skills.ps1'
 $repairChromeHostScript = Join-Path $internalRoot 'repair-chrome-host.ps1'
 $dailyLauncher = Join-Path $packageRoot 'Codex.cmd'
-$appLauncher = Join-Path $internalRoot 'app\Codex.exe'
+$appLauncher = Join-Path $internalRoot 'app\ChatGPT.exe'
 $unpackedExtensionPath = Join-Path $internalRoot 'chrome-extension\unpacked'
 $resolvedCodexHome = if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     Join-Path ([System.Environment]::GetFolderPath('UserProfile')) '.codex'

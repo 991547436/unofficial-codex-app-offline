@@ -19,7 +19,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\_internal\app\Codex.exe
+UninstallDisplayIcon={app}\_internal\app\ChatGPT.exe
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
@@ -62,7 +62,7 @@ Name: "chromeguide"; Description: "{cm:TaskChromeGuide}"; Flags: unchecked
 [Registry]
 Root: HKCU; Subkey: "Software\Classes\codex"; ValueType: string; ValueName: ""; ValueData: "URL:Codex Protocol"; Flags: uninsdeletekey; Tasks: codexlinks
 Root: HKCU; Subkey: "Software\Classes\codex"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey; Tasks: codexlinks
-Root: HKCU; Subkey: "Software\Classes\codex\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\_internal\app\Codex.exe"",0"; Flags: uninsdeletekey; Tasks: codexlinks
+Root: HKCU; Subkey: "Software\Classes\codex\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\_internal\app\ChatGPT.exe"",0"; Flags: uninsdeletekey; Tasks: codexlinks
 Root: HKCU; Subkey: "Software\Classes\codex\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Codex.cmd"" ""%1"""; Flags: uninsdeletekey; Tasks: codexlinks
 
 [UninstallDelete]
@@ -87,9 +87,9 @@ Type: files; Name: "{app}\Repair Chrome Host.vbs"
 Type: files; Name: "{app}\Repair Chrome Host.cmd"
 
 [Icons]
-Name: "{group}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\Codex.exe"
-Name: "{autodesktop}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\Codex.exe"
-Name: "{group}\Setup Codex"; Filename: "{app}\Setup Codex.cmd"; IconFilename: "{app}\_internal\app\Codex.exe"
+Name: "{group}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\ChatGPT.exe"
+Name: "{autodesktop}\Codex"; Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\_internal\app\ChatGPT.exe"
+Name: "{group}\Setup Codex"; Filename: "{app}\Setup Codex.cmd"; IconFilename: "{app}\_internal\app\ChatGPT.exe"
 
 [Run]
 Filename: "{app}\Setup Codex.cmd"; Parameters: "{code:GetSetupCodexArgs} -NoLaunch"; Flags: skipifsilent shellexec

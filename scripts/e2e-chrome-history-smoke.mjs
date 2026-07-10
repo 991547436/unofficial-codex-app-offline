@@ -19,8 +19,8 @@ const confirmation = 'CHROME_E2E_READ_CONFIRMED';
 const title = args.title ?? `Codex App Recent History - Chrome E2E ${Date.now()}`;
 const chromeMode = args.chromeMode ?? 'installed';
 
-if (!appRoot || !fs.existsSync(path.join(appRoot, 'Codex.exe'))) {
-  throw new Error(`Codex.exe was not found under app root: ${appRoot}`);
+if (!appRoot || !fs.existsSync(path.join(appRoot, 'ChatGPT.exe'))) {
+  throw new Error(`ChatGPT.exe was not found under app root: ${appRoot}`);
 }
 if (!chromePath || !fs.existsSync(chromePath)) {
   throw new Error(`Chrome was not found: ${chromePath}`);
@@ -51,7 +51,7 @@ const targetUrl = targetServer.url;
 const debugPort = Number(args.debugPort ?? 9377);
 const out = fs.openSync(stdoutPath, 'w');
 const err = fs.openSync(stderrPath, 'w');
-const appProcess = spawn(path.join(appRoot, 'Codex.exe'), [`--remote-debugging-port=${debugPort}`], {
+const appProcess = spawn(path.join(appRoot, 'ChatGPT.exe'), [`--remote-debugging-port=${debugPort}`], {
   cwd: appRoot,
   detached: false,
   env: {

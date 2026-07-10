@@ -690,7 +690,7 @@ if ($null -ne $config.skills.official) {
 }
 
 $sourceMetadataPath = Join-Path $sourceExportRoot 'metadata/package-metadata.json'
-if ((Test-Path (Join-Path $sourceExportRoot 'app/Codex.exe')) -and (Test-Path $sourceMetadataPath)) {
+if ((Test-Path (Join-Path $sourceExportRoot 'app/ChatGPT.exe')) -and (Test-Path $sourceMetadataPath)) {
   Write-BuildTrace 'Using cached app source (skip Export-AppSource).'
   $sourceMetadata = Get-Content -Path $sourceMetadataPath -Raw | ConvertFrom-Json
   $version = $sourceMetadata.version
@@ -872,7 +872,7 @@ $dailyLaunchCmd = @(
     '@echo off',
     'setlocal',
     'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
-    'start "" /D "%~dp0_internal\app" "%~dp0_internal\app\Codex.exe" %*'
+    'start "" /D "%~dp0_internal\app" "%~dp0_internal\app\ChatGPT.exe" %*'
 )
 $dailyLaunchCmd | Set-Content -Path (Join-Path $packageRoot 'Codex.cmd') -Encoding ASCII
 
@@ -917,7 +917,7 @@ $launchDirectCmd = @(
     '@echo off',
     'setlocal',
     'set CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1',
-    'start "" /D "%~dp0..\app" "%~dp0..\app\Codex.exe" %*'
+    'start "" /D "%~dp0..\app" "%~dp0..\app\ChatGPT.exe" %*'
 )
 $launchDirectCmd | Set-Content -Path (Join-Path $toolsRoot 'Launch Codex Direct.cmd') -Encoding ASCII
 

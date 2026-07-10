@@ -128,7 +128,7 @@ foreach ($needle in @(
     '#define MyInstallerRoot "__INSTALLER_ROOT__"',
     'Name: "zh"; MessagesFile: "{#MyInstallerRoot}\ChineseSimplified.isl"',
     'Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"',
-    'IconFilename: "{app}\_internal\app\Codex.exe"',
+    'IconFilename: "{app}\_internal\app\ChatGPT.exe"',
     'zh.TaskCodexLinks=注册用于 CLI /app 的 codex:// 链接',
     'Name: "skills"; Description: "{cm:TaskSkills}"; Flags: unchecked',
     'Name: "chromehost"; Description: "{cm:TaskChromeHost}"; Flags: unchecked',
@@ -282,7 +282,7 @@ try {
         '_internal\tools\Sync Default Skills.cmd',
         '_internal\tools\Sync All Skills.cmd',
         '_internal\tools\Repair Chrome Host.cmd',
-        '_internal\app\Codex.exe',
+        '_internal\app\ChatGPT.exe',
         '_internal\app\resources\app.asar',
         '_internal\patches\init.cjs',
         '_internal\app\patches\init.cjs',
@@ -422,7 +422,7 @@ try {
 
     $dailyLauncherPath = Join-Path $portableRoot 'Codex.cmd'
     $dailyLauncherContent = Get-Content -Path $dailyLauncherPath -Raw
-    foreach ($needle in @('%~dp0_internal\app\Codex.exe', '/D "%~dp0_internal\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+    foreach ($needle in @('%~dp0_internal\app\ChatGPT.exe', '/D "%~dp0_internal\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
         if (-not $dailyLauncherContent.Contains($needle)) {
             throw "Daily launcher is missing expected relative-launch marker: $needle"
         }
@@ -430,7 +430,7 @@ try {
 
     $directLauncherPath = Join-Path $portableRoot '_internal\tools\Launch Codex Direct.cmd'
     $directLauncherContent = Get-Content -Path $directLauncherPath -Raw
-    foreach ($needle in @('%~dp0..\app\Codex.exe', '/D "%~dp0..\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
+    foreach ($needle in @('%~dp0..\app\ChatGPT.exe', '/D "%~dp0..\app"', 'CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE')) {
         if (-not $directLauncherContent.Contains($needle)) {
             throw "Direct launcher is missing expected app-working-directory marker: $needle"
         }

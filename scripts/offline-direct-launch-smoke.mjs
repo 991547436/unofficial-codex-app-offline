@@ -5,6 +5,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { execFileSync, spawn } from 'node:child_process';
 
+// The Electron binary the MSIX manifest declares as its entry point.
+const MAIN_EXECUTABLE_NAME = 'ChatGPT.exe';
+
 const args = parseArgs(process.argv.slice(2));
 const timeoutMs = Number(args.timeoutMs ?? args['timeout-ms'] ?? 30_000);
 const workRoot = path.resolve(
@@ -26,10 +29,10 @@ const portableRoot = resolvePortableRoot({
   workRoot,
 });
 const appRoot = path.join(portableRoot, '_internal', 'app');
-const appExe = path.join(appRoot, 'Codex.exe');
+const appExe = path.join(appRoot, MAIN_EXECUTABLE_NAME);
 
 if (!fs.existsSync(appExe)) {
-  throw new Error(`Codex.exe was not found under portable root: ${appExe}`);
+  throw new Error(`${MAIN_EXECUTABLE_NAME} was not found under portable root: ${appExe}`);
 }
 
 const stdoutPath = path.join(workRoot, 'codex-stdout.log');
@@ -181,7 +184,7 @@ function resolvePortableRoot({ portableRoot, portableZip, workRoot }) {
 }
 
 function normalizePortableRoot(root) {
-  if (fs.existsSync(path.join(root, '_internal', 'app', 'Codex.exe'))) {
+  if (fs.existsSync(path.join(root, '_internal', 'app', MAIN_EXECUTABLE_NAME))) {
     return root;
   }
 
@@ -189,7 +192,7 @@ function normalizePortableRoot(root) {
     .readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(root, entry.name));
-  if (children.length === 1 && fs.existsSync(path.join(children[0], '_internal', 'app', 'Codex.exe'))) {
+  if (children.length === 1 && fs.existsSync(path.join(children[0], '_internal', 'app', MAIN_EXECUTABLE_NAME))) {
     return children[0];
   }
 
