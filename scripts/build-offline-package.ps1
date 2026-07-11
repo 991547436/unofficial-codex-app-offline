@@ -1264,7 +1264,9 @@ if ($config.packaging.setupExe -and -not $SkipInstaller) {
         }
 
         try {
-            $template = Get-Content -Path $templateFile -Raw
+            $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+            $installerUtf8 = New-Object System.Text.UTF8Encoding($true, $true)
+            $template = [System.IO.File]::ReadAllText($templateFile, $strictUtf8)
             $rendered = $template
             $rendered = $rendered.Replace('__APP_NAME__', [string]$config.appName)
             $rendered = $rendered.Replace('__APP_VERSION__', [string]$version)
@@ -1273,7 +1275,20 @@ if ($config.packaging.setupExe -and -not $SkipInstaller) {
             $rendered = $rendered.Replace('__INSTALLER_ROOT__', [string](Join-Path $repoRoot 'installer').Replace('/', '\\'))
             $rendered = $rendered.Replace('__OUTPUT_ROOT__', [string]$artifactRoot.Replace('/', '\\'))
             $rendered = $rendered.Replace('__OUTPUT_BASENAME__', [string]('{0}-setup' -f $releaseBase))
-            $rendered | Set-Content -Path $issFile -Encoding UTF8
+            foreach ($requiredChineseMessage in @(
+                'zh.TaskSkills=安装默认离线技能（大部分技能需要联网，离线环境下无法使用）',
+                'zh.TaskChromeHost=注册 @chrome 本机桥接',
+                'zh.TaskCodexLinks=注册用于 CLI /app 的 codex:// 链接',
+                'zh.TaskAppShim=安装 CLI /app 的 PowerShell shim（会覆盖 Get-AppxPackage 命令，可能与已安装的商店版 Codex Desktop 冲突）',
+                'zh.TaskComputerUse=修复 Computer Use 插件布局',
+                'zh.TaskChromeGuide=打开 Chrome 扩展设置引导',
+                'zh.LaunchCodex=启动 Codex'
+            )) {
+                if (-not $rendered.Contains($requiredChineseMessage)) {
+                    throw "Generated installer script is missing expected UTF-8 text: $requiredChineseMessage"
+                }
+            }
+            [System.IO.File]::WriteAllText($issFile, $rendered, $installerUtf8)
             & $iscc $issFile | Out-Host
             if ($LASTEXITCODE -ne 0) {
                 throw "Inno Setup failed with exit code $LASTEXITCODE."

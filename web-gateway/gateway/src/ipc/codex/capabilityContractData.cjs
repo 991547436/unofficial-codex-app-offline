@@ -132,7 +132,6 @@ const REQUIRED_WEB_SHELL_FEATURE_MARKERS = Object.freeze([
   "avatar-overlay-open-state-changed",
   'w.location.pathname === "/avatar-overlay"',
   "w.history.replaceState",
-  ...REQUIRED_STATSIG_FEATURE_MARKERS,
 ]);
 
 const DESKTOP_BROWSER_USE_CAPABILITY_KEYS = Object.freeze([
@@ -225,6 +224,7 @@ const DESKTOP_ASAR_PATCH_MARKERS = Object.freeze([
   "/*codex-offline:renderer-known-statsig-gates*/",
   "/*codex-offline:workspace-dependencies-settings*/",
   "/*codex-offline:model-id-display-name-fallback*/",
+  "/*codex-offline:ultra-reasoning-effort*/",
   "/*codex-offline:codex-mobile-auth-relogin*/",
   "/*codex-offline:electron-namespace-no-auto-updater*/",
 ]);

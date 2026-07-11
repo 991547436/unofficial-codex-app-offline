@@ -100,6 +100,17 @@ function Assert-CapabilityContractDefaults {
     }
 }
 
+function Get-WebShellOwnedFeatureMarkers {
+    param(
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    $statsigMarkers = @($Contract.requiredStatsigFeatureMarkers | ForEach-Object { [string]$_ })
+    return @($Contract.requiredWebShellFeatureMarkers | Where-Object {
+        $statsigMarkers -notcontains [string]$_
+    })
+}
+
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $buildMetadataFile = Resolve-AbsolutePath -BasePath $repoRoot -PathValue $BuildMetadataPath
@@ -121,7 +132,8 @@ $installerTemplatePath = Join-Path $repoRoot 'installer\CodexOffline.iss.tpl'
 if (-not (Test-Path $installerTemplatePath)) {
     throw "Installer template was not found: $installerTemplatePath"
 }
-$installerTemplateContent = Get-Content -Path $installerTemplatePath -Raw
+$strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+$installerTemplateContent = [System.IO.File]::ReadAllText($installerTemplatePath, $strictUtf8)
 foreach ($needle in @(
     'DefaultDirName={%USERPROFILE|{localappdata}}\Codex',
     'UsePreviousAppDir=no',
@@ -129,7 +141,13 @@ foreach ($needle in @(
     'Name: "zh"; MessagesFile: "{#MyInstallerRoot}\ChineseSimplified.isl"',
     'Filename: "{app}\Codex.cmd"; WorkingDir: "{app}"',
     'IconFilename: "{app}\_internal\app\ChatGPT.exe"',
+    'zh.TaskSkills=安装默认离线技能（大部分技能需要联网，离线环境下无法使用）',
+    'zh.TaskChromeHost=注册 @chrome 本机桥接',
     'zh.TaskCodexLinks=注册用于 CLI /app 的 codex:// 链接',
+    'zh.TaskAppShim=安装 CLI /app 的 PowerShell shim（会覆盖 Get-AppxPackage 命令，可能与已安装的商店版 Codex Desktop 冲突）',
+    'zh.TaskComputerUse=修复 Computer Use 插件布局',
+    'zh.TaskChromeGuide=打开 Chrome 扩展设置引导',
+    'zh.LaunchCodex=启动 Codex',
     'Name: "skills"; Description: "{cm:TaskSkills}"; Flags: unchecked',
     'Name: "chromehost"; Description: "{cm:TaskChromeHost}"; Flags: unchecked',
     'Name: "codexlinks"; Description: "{cm:TaskCodexLinks}"; Flags: unchecked',
@@ -158,7 +176,7 @@ if (-not (Test-Path $installerLanguagePath)) {
     throw "Installer Simplified Chinese language file was not found: $installerLanguagePath"
 }
 
-$installerLanguageContent = Get-Content -Path $installerLanguagePath -Raw
+$installerLanguageContent = [System.IO.File]::ReadAllText($installerLanguagePath, $strictUtf8)
 foreach ($needle in @(
     'LanguageName=简体中文',
     'LanguageID=$0804'
@@ -553,7 +571,7 @@ try {
     $webGatewayCapabilityContractDataContent = Get-Content -Path $webGatewayCapabilityContractDataPath -Raw
     $webGatewayCapabilityContract = Read-CapabilityContract -ContractPath $webGatewayCapabilityContractPath
     Assert-CapabilityContractDefaults -Contract $webGatewayCapabilityContract -Context 'Web gateway'
-    Assert-ContentContainsMarkers -Content $webShellBridgeContent -Markers $webGatewayCapabilityContract.requiredWebShellFeatureMarkers -Context 'Web shell bridge'
+    Assert-ContentContainsMarkers -Content $webShellBridgeContent -Markers (Get-WebShellOwnedFeatureMarkers -Contract $webGatewayCapabilityContract) -Context 'Web shell bridge'
     Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractContent -Markers @('capabilityContractData.cjs') -Context 'Web gateway capability contract'
     Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractDataContent -Markers $webGatewayCapabilityContract.requiredStatsigFeatureMarkers -Context 'Web gateway capability contract data'
     Assert-ContentContainsMarkers -Content $webGatewayCapabilityContractDataContent -Markers $webGatewayCapabilityContract.requiredDesktopFeatureMarkers -Context 'Web gateway capability contract data'
@@ -679,7 +697,7 @@ try {
         $webZipCapabilityContractDataContent = Get-Content -Path $webZipCapabilityContractDataPath -Raw
         $webZipCapabilityContract = Read-CapabilityContract -ContractPath $webZipCapabilityContractPath
         Assert-CapabilityContractDefaults -Contract $webZipCapabilityContract -Context 'Web zip gateway'
-        Assert-ContentContainsMarkers -Content $webZipShellBridgeContent -Markers $webZipCapabilityContract.requiredWebShellFeatureMarkers -Context 'Web zip shell bridge'
+        Assert-ContentContainsMarkers -Content $webZipShellBridgeContent -Markers (Get-WebShellOwnedFeatureMarkers -Contract $webZipCapabilityContract) -Context 'Web zip shell bridge'
         Assert-ContentContainsMarkers -Content $webZipCapabilityContractContent -Markers @('capabilityContractData.cjs') -Context 'Web zip capability contract'
         Assert-ContentContainsMarkers -Content $webZipCapabilityContractDataContent -Markers $webZipCapabilityContract.requiredStatsigFeatureMarkers -Context 'Web zip capability contract data'
         Assert-ContentContainsMarkers -Content $webZipCapabilityContractDataContent -Markers $webZipCapabilityContract.requiredDesktopFeatureMarkers -Context 'Web zip capability contract data'
@@ -1162,6 +1180,8 @@ const WORKSPACE_DEPENDENCIES_SETTINGS_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:workspace-dependencies-settings*/');
 const MODEL_DISPLAY_NAME_FALLBACK_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:model-id-display-name-fallback*/');
+const ULTRA_REASONING_EFFORT_PATCH_MARKER =
+  requiredPatchMarker('/*codex-offline:ultra-reasoning-effort*/');
 const bundledPluginCacheLockFatalResultRe =
   /if\([A-Za-z_$][\w$]*!=null\)\{if\([A-Za-z_$][\w$]*\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:[A-Za-z_$][\w$]*\(\{error:[A-Za-z_$][\w$]*\.error,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily,\.\.\.[A-Za-z_$][\w$]*\.safe\},sensitive:\{error:[A-Za-z_$][\w$]*\.error,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot,\.\.\.[A-Za-z_$][\w$]*\.sensitive\}\}\),n\)throw [A-Za-z_$][\w$]*\.error;return!1\}return!0\}/;
 const bundledPluginCacheLockFatalCatchRe =
@@ -1281,6 +1301,8 @@ let rendererKnownStatsigGatesPatched = false;
 let workspaceDependenciesSettingsSurfaceSeen = false;
 let workspaceDependenciesSettingsPatched = false;
 let modelDisplayNameFallbackPatched = false;
+let ultraReasoningEffortSurfaceSeen = false;
+let ultraReasoningEffortPatched = false;
 let codexMobileRemoteControlMfaEndpointSeen = false;
 let codexMobileAuthReloginPatched = false;
 const bundledBrowserPluginForceReloadResiduals = [];
@@ -1291,6 +1313,7 @@ const bundledPluginCacheLockFatalResiduals = [];
 const webviewBrokenBooleanPatchResiduals = [];
 const rendererKnownStatsigGateResiduals = [];
 const rendererKnownStatsigGateLiteralEntries = [];
+const ultraReasoningEffortResiduals = [];
 
 for (const entry of javaScriptEntries) {
   const content = asar.extractFile(asarPath, entryMap.get(entry)).toString('utf8');
@@ -1311,6 +1334,21 @@ for (const entry of javaScriptEntries) {
     }
     if (content.includes(MODEL_DISPLAY_NAME_FALLBACK_PATCH_MARKER)) {
       modelDisplayNameFallbackPatched = true;
+    }
+    if (content.includes('hasModelSupportingUltraReasoningEffort')) {
+      ultraReasoningEffortSurfaceSeen = true;
+      if (
+        /\.supportedReasoningEfforts\.filter\(\(\{reasoningEffort:[A-Za-z_$][\w$]*\}\)=>[A-Za-z_$][\w$]*!==`ultra`\)/.test(content)
+      ) {
+        ultraReasoningEffortResiduals.push(entry);
+      }
+      if (
+        content.includes(ULTRA_REASONING_EFFORT_PATCH_MARKER) &&
+        content.includes('reasoningEffort:`ultra`,description:`ultra effort`') &&
+        content.includes('===`max`||')
+      ) {
+        ultraReasoningEffortPatched = true;
+      }
     }
     const literalGateIds = [];
     for (const gateId of DESKTOP_ASAR_KNOWN_GATE_IDS) {
@@ -1488,6 +1526,18 @@ if (!workspaceDependenciesSettingsPatched) {
 }
 if (!modelDisplayNameFallbackPatched) {
   throw new Error('Renderer formatted model-ID fallback marker is missing from app.asar.');
+}
+if (ultraReasoningEffortResiduals.length > 0) {
+  throw new Error(
+    'Renderer still filters Ultra reasoning effort after patching: ' +
+    ultraReasoningEffortResiduals.join(', ')
+  );
+}
+if (!ultraReasoningEffortSurfaceSeen) {
+  throw new Error('Renderer Ultra reasoning effort model filter is missing from app.asar.');
+}
+if (!ultraReasoningEffortPatched) {
+  throw new Error('Renderer Ultra reasoning effort availability patch is missing from app.asar.');
 }
 if (legacyElectronNamespacePatchResiduals.length > 0) {
   throw new Error(

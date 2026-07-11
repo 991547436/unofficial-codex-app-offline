@@ -724,6 +724,56 @@ function patchWorkspaceDependenciesSettingsGate(
 }
 // end patchWorkspaceDependenciesSettingsGate
 
+const ULTRA_REASONING_EFFORT_PATCH_MARKER =
+  contractPatchMarker('/*codex-offline:ultra-reasoning-effort*/');
+
+function patchUltraReasoningEffortAvailability(content) {
+  const patchMarker = ULTRA_REASONING_EFFORT_PATCH_MARKER;
+  const surfaceMarker = 'hasModelSupportingUltraReasoningEffort';
+  if (!content.includes(surfaceMarker)) {
+    return { content, seen: false, patched: false, alreadyCorrect: false };
+  }
+
+  const capabilityRe =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\.some\(([A-Za-z_$][\w$]*)=>\4\.supportedReasoningEfforts\.some\(\(\{reasoningEffort:([A-Za-z_$][\w$]*)\}\)=>\5===`ultra`\)\)/;
+  const patchedCapabilityRe =
+    /[A-Za-z_$][\w$]*=\([A-Za-z_$][\w$]*=!0\)&&[A-Za-z_$][\w$]*\.some\(([A-Za-z_$][\w$]*)=>\1\.supportedReasoningEfforts\.some\(\(\{reasoningEffort:([A-Za-z_$][\w$]*)\}\)=>\2===`max`\|\|\2===`ultra`\)\)\/\*codex-offline:ultra-reasoning-effort\*\//;
+  const modelEffortsRe =
+    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\?([A-Za-z_$][\w$]*)\.supportedReasoningEfforts:\3\.supportedReasoningEfforts\.filter\(\(\{reasoningEffort:([A-Za-z_$][\w$]*)\}\)=>\4!==`ultra`\),/;
+  const capabilityMatch = capabilityRe.exec(content);
+  const modelEffortsMatch = modelEffortsRe.exec(content);
+  if (content.includes(patchMarker)) {
+    const alreadyCorrect =
+      patchedCapabilityRe.test(content) &&
+      content.includes('reasoningEffort:`ultra`,description:`ultra effort`') &&
+      !modelEffortsMatch;
+    return { content, seen: true, patched: false, alreadyCorrect };
+  }
+  if (!capabilityMatch || !modelEffortsMatch) {
+    return { content, seen: true, patched: false, alreadyCorrect: false };
+  }
+
+  const capabilityReplacement =
+    `${capabilityMatch[1]}=(${capabilityMatch[2]}=!0)&&${capabilityMatch[3]}` +
+    `.some(${capabilityMatch[4]}=>${capabilityMatch[4]}.supportedReasoningEfforts` +
+    `.some(({reasoningEffort:${capabilityMatch[5]}})=>` +
+    `${capabilityMatch[5]}===\`max\`||${capabilityMatch[5]}===\`ultra\`))${patchMarker}`;
+  let next = content.replace(capabilityRe, capabilityReplacement);
+
+  const [efforts, includeUltra, model, effort] = modelEffortsMatch.slice(1);
+  const modelEffortsReplacement =
+    `let ${efforts}=((` +
+    `${includeUltra}=!0),${model}.supportedReasoningEfforts` +
+    `.some(({reasoningEffort:${effort}})=>${effort}===\`max\`)&&!` +
+    `${model}.supportedReasoningEfforts.some(({reasoningEffort:${effort}})=>` +
+    `${effort}===\`ultra\`)?[...${model}.supportedReasoningEfforts,` +
+    `{reasoningEffort:\`ultra\`,description:\`ultra effort\`}]:` +
+    `${model}.supportedReasoningEfforts),`;
+  next = next.replace(modelEffortsRe, modelEffortsReplacement);
+  return { content: next, seen: true, patched: true, alreadyCorrect: false };
+}
+// end patchUltraReasoningEffortAvailability
+
 const MODEL_DISPLAY_NAME_FALLBACK_PATCH_MARKER =
   contractPatchMarker('/*codex-offline:model-id-display-name-fallback*/');
 
@@ -3705,12 +3755,15 @@ try {
     const archivedThreadsPartialListPatchedFiles = [];
     const archivedSettingsOfflineVisibilityPatchedFiles = [];
     const modelDisplayNamePatchedFiles = [];
+    const ultraReasoningEffortPatchedFiles = [];
     let computerUseNodeReplDynamicToolAlreadyCorrect = false;
     let computerUseNodeReplDynamicToolCallAlreadyCorrect = false;
     let archivedThreadsPartialListAlreadyCorrect = false;
     let archivedSettingsOfflineVisibilityAlreadyCorrect = false;
     let workspaceDependenciesSettingsAlreadyCorrect = false;
     let modelDisplayNameAlreadyCorrect = false;
+    let ultraReasoningEffortSurfaceSeen = false;
+    let ultraReasoningEffortAlreadyCorrect = false;
 
     for (const filePath of webviewJsFiles) {
       let content = fs.readFileSync(filePath, 'utf8');
@@ -3762,6 +3815,17 @@ try {
         changed = true;
       } else if (modelDisplayNamePatch.alreadyCorrect) {
         modelDisplayNameAlreadyCorrect = true;
+      }
+
+      const ultraReasoningEffortPatch =
+        patchUltraReasoningEffortAvailability(content);
+      ultraReasoningEffortSurfaceSeen ||= ultraReasoningEffortPatch.seen;
+      if (ultraReasoningEffortPatch.patched) {
+        content = ultraReasoningEffortPatch.content;
+        ultraReasoningEffortPatchedFiles.push(path.relative(tmpDir, filePath));
+        changed = true;
+      } else if (ultraReasoningEffortPatch.alreadyCorrect) {
+        ultraReasoningEffortAlreadyCorrect = true;
       }
 
       const workspaceDependenciesSettingsPatch =
@@ -3919,6 +3983,20 @@ try {
     } else {
       failRequiredPatch(
         'Could not locate the renderer Custom model-label fallback to show the model ID.',
+      );
+    }
+    if (ultraReasoningEffortPatchedFiles.length > 0) {
+      log('Ultra reasoning effort enabled for Max-capable models in ' +
+        `${ultraReasoningEffortPatchedFiles.join(', ')}.`);
+    } else if (ultraReasoningEffortAlreadyCorrect) {
+      log('Ultra reasoning effort availability already patched.');
+    } else if (ultraReasoningEffortSurfaceSeen) {
+      failRequiredPatch(
+        'Could not patch the renderer model filter to expose Ultra for Max-capable models.',
+      );
+    } else {
+      failRequiredPatch(
+        'Could not locate the renderer Ultra reasoning effort model filter.',
       );
     }
   }
