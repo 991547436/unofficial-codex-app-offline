@@ -1182,6 +1182,29 @@ const MODEL_DISPLAY_NAME_FALLBACK_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:model-id-display-name-fallback*/');
 const ULTRA_REASONING_EFFORT_PATCH_MARKER =
   requiredPatchMarker('/*codex-offline:ultra-reasoning-effort*/');
+function archivedThreadListForcesStateDbOnly(content) {
+  let searchFrom = 0;
+  for (;;) {
+    const markerIndex = content.indexOf(
+      ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER,
+      searchFrom,
+    );
+    if (markerIndex < 0) return false;
+
+    // The legacy patch conditionally forces true only for archived queries.
+    // Current builds removed the option and already send true for every query,
+    // which is strictly stronger and must also satisfy verification.
+    const patchedFunction = content.slice(Math.max(0, markerIndex - 6000), markerIndex);
+    if (
+      /useStateDbOnly:(?:[A-Za-z_$][\w$]*\?!0:[A-Za-z_$][\w$]*|!0)/
+        .test(patchedFunction)
+    ) {
+      return true;
+    }
+    searchFrom = markerIndex + ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER.length;
+  }
+}
+// end archivedThreadListForcesStateDbOnly
 const bundledPluginCacheLockFatalResultRe =
   /if\([A-Za-z_$][\w$]*!=null\)\{if\([A-Za-z_$][\w$]*\.warning\(`bundled_plugins_marketplace_install_failed`,\{safe:\{errorCategory:[A-Za-z_$][\w$]*\(\{error:[A-Za-z_$][\w$]*\.error,platformFamily:e\.platformFamily\}\),marketplaceName:t,platformFamily:e\.platformFamily,\.\.\.[A-Za-z_$][\w$]*\.safe\},sensitive:\{error:[A-Za-z_$][\w$]*\.error,marketplaceRoot:e\.materializedMarketplace\.marketplaceRoot,\.\.\.[A-Za-z_$][\w$]*\.sensitive\}\}\),n\)throw [A-Za-z_$][\w$]*\.error;return!1\}return!0\}/;
 const bundledPluginCacheLockFatalCatchRe =
@@ -1430,8 +1453,7 @@ for (const entry of javaScriptEntries) {
     content.includes('_codexOfflineArchiveListFailed') &&
     content.includes('globalThis.__codexOfflineArchivedThreadsCache');
   archivedThreadsStateDbOnlyPatched ||=
-    content.includes(ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER) &&
-    /useStateDbOnly:[A-Za-z_$][\w$]*\?!0:[A-Za-z_$][\w$]*/.test(content);
+    archivedThreadListForcesStateDbOnly(content);
   archivedSettingsOfflineLocalVisibilityPatched ||=
     content.includes(ARCHIVED_SETTINGS_OFFLINE_LOCAL_VISIBILITY_PATCH_MARKER) &&
     content.includes('archivedChats:') &&
