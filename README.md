@@ -138,6 +138,8 @@ pwsh -NoProfile -File ./scripts/build-offline-package.ps1
 5. 编译 web-gateway TypeScript
 6. 打包：便携 ZIP + 跨平台 Web ZIP + 安装器 EXE
 
+发布标签、标题、产物文件名和 `_internal/app/version.txt` 均使用镜像 Release 标签中的 Codex 版本（例如 `26.715.21425`），不使用 MSIX 文件名中的 Windows 包版本。
+
 ### CI
 
 每天 UTC 3:15 自动检查 Store 版本，有新版则构建发布。`[force-rebuild]` 提交标记可强制重建。
@@ -225,7 +227,7 @@ See `config/offline-package.json`. Key fields:
 | `packaging.crossPlatformWeb` | Generate cross-platform web ZIP |
 | `packaging.setupExe` | Generate Inno Setup installer |
 
-CI runs daily at 3:15 UTC. Commits tagged `[force-rebuild]` trigger a rebuild even if the mirrored package version hasn't changed.
+CI runs daily at 3:15 UTC. Release tags, titles, artifact names, and `_internal/app/version.txt` all use the Codex version from the mirror release tag, not the Windows package version embedded in the MSIX filename. Commits tagged `[force-rebuild]` trigger a rebuild even if the mirrored Codex version hasn't changed.
 
 ### Risks
 

@@ -37,8 +37,10 @@ export function globToRegExp(pattern) {
   return new RegExp(`^${source}$`, 'i');
 }
 
-export function packageVersionFromFileName(fileName) {
-  return fileName.match(/^OpenAI\.Codex_(\d+(?:\.\d+)+)_/i)?.[1] ?? null;
+export function releaseVersionFromTag(tagName) {
+  return typeof tagName === 'string'
+    ? tagName.match(/^codex-app-(\d+(?:\.\d+)+)$/i)?.[1] ?? null
+    : null;
 }
 
 function sha256FromDigest(digest) {
@@ -83,9 +85,9 @@ export function selectReleaseAsset(releases, assetPattern = DEFAULT_ASSET_PATTER
       );
     }
 
-    const version = packageVersionFromFileName(selected.fileName);
-    if (!version) {
-      throw new Error(`Could not parse MSIX package version from ${selected.fileName}.`);
+    const releaseVersion = releaseVersionFromTag(release.tag_name);
+    if (!releaseVersion) {
+      throw new Error(`Could not parse Codex version from release tag ${release.tag_name}.`);
     }
 
     return {
@@ -98,7 +100,7 @@ export function selectReleaseAsset(releases, assetPattern = DEFAULT_ASSET_PATTER
       },
       selected,
       candidates: candidates.map(normalizeAsset),
-      version,
+      version: releaseVersion,
     };
   }
 

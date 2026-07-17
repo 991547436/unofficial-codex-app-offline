@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { pathToFileURL } = require("node:url");
@@ -49,7 +50,9 @@ test("resolver skips draft and prerelease entries and returns SHA-256 metadata",
   ];
 
   const result = selectReleaseAsset(releases);
-  assert.equal(result.version, "26.715.2305.0");
+  assert.equal(result.version, "26.715.21425");
+  assert.equal("releaseVersion" in result, false);
+  assert.equal("packageVersion" in result, false);
   assert.equal(result.release.tagName, "codex-app-26.715.21425");
   assert.equal(
     result.selected.sha256,
@@ -65,4 +68,29 @@ test("resolver refuses an unverified MSIX asset", async () => {
     ]),
     /does not provide a SHA-256 digest/,
   );
+});
+
+test("build and release artifacts use only the GitHub release version", () => {
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const buildScript = fs.readFileSync(
+    path.join(repoRoot, "scripts", "build-offline-package.ps1"),
+    "utf8",
+  );
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "build-offline-package.yml"),
+    "utf8",
+  );
+  const verifier = fs.readFileSync(
+    path.join(repoRoot, "scripts", "verify-offline-package.ps1"),
+    "utf8",
+  );
+
+  assert.match(buildScript, /app\\version\.txt/);
+  assert.match(buildScript, /\$version = \[string\]\$sourceMetadata\.version/);
+  assert.match(workflow, /Codex version: `` \$version ``/);
+  assert.doesNotMatch(buildScript, /packageVersion/);
+  assert.doesNotMatch(workflow, /package_version|packageVersion/);
+  assert.doesNotMatch(workflow, /Store version:/);
+  assert.match(verifier, /_internal\\app\\version\.txt/);
+  assert.match(verifier, /\$packagedVersion -ne \[string\]\$metadata\.version/);
 });

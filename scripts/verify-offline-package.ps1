@@ -301,6 +301,7 @@ try {
         '_internal\tools\Sync All Skills.cmd',
         '_internal\tools\Repair Chrome Host.cmd',
         '_internal\app\ChatGPT.exe',
+        '_internal\app\version.txt',
         '_internal\app\resources\app.asar',
         '_internal\patches\init.cjs',
         '_internal\app\patches\init.cjs',
@@ -315,6 +316,14 @@ try {
         if (-not (Test-Path $fullPath)) {
             throw "Portable zip is missing required file: $relativePath"
         }
+    }
+
+    $packagedVersion = [System.IO.File]::ReadAllText(
+        (Join-Path $portableRoot '_internal\app\version.txt'),
+        $strictUtf8
+    ).Trim()
+    if ($packagedVersion -ne [string]$metadata.version) {
+        throw "Packaged app version.txt '$packagedVersion' does not match release version '$($metadata.version)'."
     }
 
     $desktopModelAvailabilityMarkers = @(

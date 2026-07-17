@@ -305,7 +305,7 @@ jobs:
 
           $lines = [System.Collections.Generic.List[string]]::new()
           $lines.Add("Source package: `` $packageId ``")
-          $lines.Add("Store version: `` $version ``")
+          $lines.Add("Codex version: `` $version ``")
           $lines.Add("Source mode: `` $sourceMode ``")
           if ($generatedAt) {
             $lines.Add("Built at: `` $generatedAt ``")

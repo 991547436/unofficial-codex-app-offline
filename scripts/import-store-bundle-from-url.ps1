@@ -6,7 +6,10 @@ param(
     [string]$DownloadedFileName = '',
     [string]$ExpectedSha1 = '',
     [string]$ExpectedSha256 = '',
-    [string]$SourceMode = 'github_release'
+    [string]$SourceMode = 'github_release',
+    [string]$SourceRepository = '',
+    [string]$SourceReleaseTag = '',
+    [string]$SourceVersion = ''
 )
 
 Set-StrictMode -Version Latest
@@ -155,12 +158,14 @@ try {
     $metadata = [ordered]@{
         appName = $identity.Name
         packageFamilyName = $PackageFamilyName
-        version = $identity.Version
+        version = if ([string]::IsNullOrWhiteSpace($SourceVersion)) { $identity.Version } else { $SourceVersion }
         publisher = $identity.Publisher
         exportedAt = (Get-Date).ToString('o')
         exportedAppPath = 'app'
         manifestPath = 'metadata/AppxManifest.xml'
         sourceMode = $SourceMode
+        sourceRepository = if ([string]::IsNullOrWhiteSpace($SourceRepository)) { $null } else { $SourceRepository }
+        sourceReleaseTag = if ([string]::IsNullOrWhiteSpace($SourceReleaseTag)) { $null } else { $SourceReleaseTag }
         sourceBundleUrl = $BundleUrl
         sourceFileName = $downloadName
         sourceSha1 = if ([string]::IsNullOrWhiteSpace($ExpectedSha1)) { $null } else { $ExpectedSha1.ToLowerInvariant() }

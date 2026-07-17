@@ -280,6 +280,9 @@ function Export-AppSource {
                 -DownloadedFileName $resolved.selected.fileName `
                 -ExpectedSha256 $resolved.selected.sha256 `
                 -SourceMode $mode `
+                -SourceRepository $resolved.repository `
+                -SourceReleaseTag $resolved.release.tagName `
+                -SourceVersion $resolved.version `
                 -Destination $SourceExportRoot `
                 -PackageFamilyName $Config.appSource.packageFamilyName | Out-Null
 
@@ -699,7 +702,6 @@ $sourceMetadataPath = Join-Path $sourceExportRoot 'metadata/package-metadata.jso
 if ((Test-Path (Join-Path $sourceExportRoot 'app/ChatGPT.exe')) -and (Test-Path $sourceMetadataPath)) {
   Write-BuildTrace 'Using cached app source (skip Export-AppSource).'
   $sourceMetadata = Get-Content -Path $sourceMetadataPath -Raw | ConvertFrom-Json
-  $version = $sourceMetadata.version
   $cachedSourceMode = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'sourceMode')
   if ([string]::IsNullOrWhiteSpace($cachedSourceMode)) {
       $cachedSourceMode = [string]$config.appSource.mode
@@ -708,7 +710,8 @@ if ((Test-Path (Join-Path $sourceExportRoot 'app/ChatGPT.exe')) -and (Test-Path 
       mode = $cachedSourceMode
       resolver = 'cached'
       packageFamilyName = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'packageFamilyName')
-      version = $version
+      repository = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'sourceRepository')
+      version = [string]$sourceMetadata.version
   }
   $cachedInstallLocation = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'installLocation')
   if (-not [string]::IsNullOrWhiteSpace($cachedInstallLocation)) {
@@ -720,14 +723,16 @@ if ((Test-Path (Join-Path $sourceExportRoot 'app/ChatGPT.exe')) -and (Test-Path 
           fileName = $cachedSourceFileName
           href = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'sourceBundleUrl')
           sha1 = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'sourceSha1')
+          sha256 = [string](Get-OptionalProperty -Object $sourceMetadata -Name 'sourceSha256')
       }
   }
 } else {
   Write-BuildTrace 'Exporting app source.'
   $appSourceInfo = Export-AppSource -Config $config -ScriptRoot $scriptRoot -SourceExportRoot $sourceExportRoot
   $sourceMetadata = Get-Content -Path $sourceMetadataPath -Raw | ConvertFrom-Json
-  $version = $sourceMetadata.version
 }
+$version = [string]$sourceMetadata.version
+$appSourceInfo['version'] = $version
 $releaseBase = '{0}-{1}' -f $config.releaseNamePrefix, $version
 $releaseTag = 'offline-v{0}' -f $version
 $artifactRoot = Join-Path $outputRoot $releaseBase
@@ -752,6 +757,11 @@ New-Item -ItemType Directory -Force -Path $internalRoot | Out-Null
 
 Write-BuildTrace 'App payload copied to _internal.'
 Copy-Item -Path (Join-Path $sourceExportRoot 'app') -Destination (Join-Path $internalRoot 'app') -Recurse -Force
+[System.IO.File]::WriteAllText(
+    (Join-Path $internalRoot 'app\version.txt'),
+    $version,
+    [System.Text.UTF8Encoding]::new($false)
+)
 Copy-Item -Path (Join-Path $scriptRoot 'bootstrap-codex-skills.ps1') -Destination (Join-Path $internalRoot 'bootstrap-codex-skills.ps1') -Force
 Copy-Item -Path (Join-Path $scriptRoot 'repair-chrome-host.ps1') -Destination (Join-Path $internalRoot 'repair-chrome-host.ps1') -Force
 Copy-Item -Path (Join-Path $scriptRoot 'setup-codex-offline.ps1') -Destination (Join-Path $internalRoot 'setup-codex-offline.ps1') -Force
