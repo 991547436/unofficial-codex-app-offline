@@ -26,10 +26,13 @@ $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
 $mode = [string]$config.appSource.mode
 
 switch ($mode) {
-    'rg_adguard' {
-        $resolverJson = node (Join-Path $scriptRoot 'resolve-store-bundle-url.mjs') --package-family-name $config.appSource.packageFamilyName --ring $config.appSource.ring
+    'github_release' {
+        $resolverJson = node (Join-Path $scriptRoot 'resolve-store-bundle-url.mjs') `
+            --repository $config.appSource.repository `
+            --asset-pattern $config.appSource.assetPattern `
+            --package-family-name $config.appSource.packageFamilyName
         if ($LASTEXITCODE -ne 0) {
-            throw 'The rg-adguard resolver failed.'
+            throw 'The GitHub Release resolver failed.'
         }
 
         $resolved = $resolverJson | ConvertFrom-Json
@@ -40,6 +43,8 @@ switch ($mode) {
             releaseTag = 'offline-v{0}' -f $resolved.version
             releaseName = '{0} Offline {1}' -f $config.appName, $resolved.version
             packageFamilyName = $resolved.packageFamilyName
+            repository = $resolved.repository
+            sourceRelease = $resolved.release
             selected = $resolved.selected
         } | ConvertTo-Json -Depth 8
     }

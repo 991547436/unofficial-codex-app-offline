@@ -265,24 +265,30 @@ function Export-AppSource {
                 resolver = 'local-store-install'
             }
         }
-        'rg_adguard' {
-            $resolverJson = node (Join-Path $ScriptRoot 'resolve-store-bundle-url.mjs') --package-family-name $Config.appSource.packageFamilyName --ring $Config.appSource.ring
+        'github_release' {
+            $resolverJson = node (Join-Path $ScriptRoot 'resolve-store-bundle-url.mjs') `
+                --repository $Config.appSource.repository `
+                --asset-pattern $Config.appSource.assetPattern `
+                --package-family-name $Config.appSource.packageFamilyName
             if ($LASTEXITCODE -ne 0) {
-                throw 'The rg-adguard resolver failed.'
+                throw 'The GitHub Release resolver failed.'
             }
 
             $resolved = $resolverJson | ConvertFrom-Json
             & (Join-Path $ScriptRoot 'import-store-bundle-from-url.ps1') `
                 -BundleUrl $resolved.selected.href `
                 -DownloadedFileName $resolved.selected.fileName `
-                -ExpectedSha1 $resolved.selected.sha1 `
+                -ExpectedSha256 $resolved.selected.sha256 `
+                -SourceMode $mode `
                 -Destination $SourceExportRoot `
                 -PackageFamilyName $Config.appSource.packageFamilyName | Out-Null
 
             return [ordered]@{
                 mode = $mode
-                resolver = 'rg-adguard'
+                resolver = 'github-release'
                 packageFamilyName = $resolved.packageFamilyName
+                repository = $resolved.repository
+                release = $resolved.release
                 selected = $resolved.selected
                 version = $resolved.version
             }

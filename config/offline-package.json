@@ -4,9 +4,10 @@
   "releaseNamePrefix": "codex-offline",
   "installDirName": "Codex Offline",
   "appSource": {
-    "mode": "rg_adguard",
+    "mode": "github_release",
     "packageFamilyName": "OpenAI.Codex_2p2nqsd0c76g0",
-    "ring": "Retail"
+    "repository": "Wangnov/codex-app-mirror",
+    "assetPattern": "OpenAI.Codex_*_x64*.Msix"
   },
   "skills": {
     "sources": [

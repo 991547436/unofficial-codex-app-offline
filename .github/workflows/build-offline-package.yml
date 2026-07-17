@@ -95,6 +95,8 @@ jobs:
           node --check './scripts/offline-direct-launch-smoke.mjs'
           node --check './scripts/extract-webview-from-asar.mjs'
           node --check './web-gateway/start-web.mjs'
+          node --test './scripts/test/github-release-resolver.test.cjs'
+          node --test './scripts/test/trusted-browser-client-hashes.test.cjs'
           Test-PowerShellSyntax './scripts/build-offline-package.ps1'
           Test-PowerShellSyntax './scripts/verify-offline-package.ps1'
 

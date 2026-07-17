@@ -123,16 +123,16 @@ pwsh -NoProfile -File ./scripts/build-offline-package.ps1
 
 | 脚本 | 用途 |
 |------|------|
-| `build-offline-package.ps1` | 主编排：拉取 Store 包 → 打补丁 → 打包 |
-| `resolve-store-bundle-url.mjs` | 解析 Microsoft Store CDN 下载链接 |
+| `build-offline-package.ps1` | 主编排：拉取 GitHub 镜像包 → 打补丁 → 打包 |
+| `resolve-store-bundle-url.mjs` | 解析 GitHub Mirror Release 中的 Windows x64 MSIX |
 | `patch-app-asar.mjs` | 给官方 app.asar 打兼容补丁 |
 | `setup-linux.sh` | Linux 安装与管理入口：install/start/stop/status/restart/update |
 | `build-cross-platform.sh` | 独立跨平台 Web 包构建 |
 
 ### 构建流程
 
-1. 解析 Microsoft Store 上 `OpenAI.Codex` 最新 Retail 版 CDN 链接
-2. 下载 `.msixbundle`，提取 x64 应用载荷
+1. 查找 `Wangnov/codex-app-mirror` 最新稳定 Release 中的 `OpenAI.Codex_*_x64*.Msix`
+2. 下载 `.Msix`、校验 GitHub 提供的 SHA-256，并提取应用载荷
 3. 给 `app.asar` 打补丁（脱离 MSIX、绕 feature gate、路径修复等）
 4. 拉取官方 skills、下载 primary runtime 插件、Chrome 扩展
 5. 编译 web-gateway TypeScript
@@ -163,8 +163,8 @@ Web gateway 变量（`start.sh` 同级 `.env` 文件或环境变量）：
 
 ## 风险与限制
 
-- `store.rg-adguard.net` 是第三方服务，可能失效
-- Store 包内部结构变化后解包逻辑可能需调整
+- `Wangnov/codex-app-mirror` 是第三方 GitHub 镜像，可能延迟或停止同步
+- MSIX 包内部结构变化后解包逻辑可能需调整
 - Web gateway 需要 Node.js 18+ 和 `@openai/codex` CLI，当前包不捆绑这两者
 - Chrome 扩展仍需用户手动加载一次
 - 依赖第三方 OAuth 或在线 marketplace 的插件仍需网络
@@ -218,17 +218,18 @@ See `config/offline-package.json`. Key fields:
 
 | Field | Description |
 |-------|-------------|
-| `appSource.ring` | `Retail` / `Preview` / `Insider` |
-| `appSource.mode` | `rg_adguard` (download) or `installed_store` (local) |
+| `appSource.repository` | GitHub mirror repository, defaults to `Wangnov/codex-app-mirror` |
+| `appSource.assetPattern` | Release asset glob, defaults to `OpenAI.Codex_*_x64*.Msix` |
+| `appSource.mode` | `github_release` (download) or `installed_store` (local) |
 | `packaging.portableZip` | Generate portable ZIP |
 | `packaging.crossPlatformWeb` | Generate cross-platform web ZIP |
 | `packaging.setupExe` | Generate Inno Setup installer |
 
-CI runs daily at 3:15 UTC. Commits tagged `[force-rebuild]` trigger a rebuild even if the Store version hasn't changed.
+CI runs daily at 3:15 UTC. Commits tagged `[force-rebuild]` trigger a rebuild even if the mirrored package version hasn't changed.
 
 ### Risks
 
-- Relies on third-party `store.rg-adguard.net`
-- Store package structure changes may break extraction
+- Relies on the third-party `Wangnov/codex-app-mirror` GitHub mirror
+- MSIX package structure changes may break extraction
 - Web gateway requires Node.js 18+ and `@openai/codex` CLI (not bundled)
 - Chrome extension still needs manual install step

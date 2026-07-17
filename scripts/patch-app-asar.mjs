@@ -1379,29 +1379,63 @@ function patchChromeSkillInstructions(chromePluginRoot) {
   log('Chrome skill trusted marketplace bootstrap patched.');
 }
 
+function patchTrustedBrowserClientHashesInContent(content, chromeBrowserClientHash) {
+  let found = false;
+  let patched = false;
+  let alreadyCorrect = false;
+  const trustedHashesRe =
+    /(\b(?:var|let|const)\s+|[,;])([A-Za-z_$][\w$]*)=\[((?:`[a-f0-9]{64}`)(?:,`[a-f0-9]{64}`)*)\]/g;
+
+  const nextContent = content.replace(
+    trustedHashesRe,
+    (match, declarationPrefix, identifier, hashList) => {
+      const escapedIdentifier = escapeRegExp(identifier);
+      const trustedHashDefaultRe = new RegExp(
+        `trustedBrowserClientSha256s:[A-Za-z_$][\\w$]*=${escapedIdentifier}\\b`,
+      );
+      const trustedHashValueRe = new RegExp(
+        `trustedBrowserClientSha256s:${escapedIdentifier}\\b`,
+      );
+      if (!trustedHashDefaultRe.test(content) && !trustedHashValueRe.test(content)) {
+        return match;
+      }
+
+      found = true;
+      const hashes = new Set(
+        Array.from(hashList.matchAll(/`([a-f0-9]{64})`/g), item => item[1]),
+      );
+      if (hashes.has(chromeBrowserClientHash)) {
+        alreadyCorrect = true;
+        return match;
+      }
+
+      hashes.add(chromeBrowserClientHash);
+      patched = true;
+      return `${declarationPrefix}${identifier}=[${Array.from(hashes)
+        .map(hash => `\`${hash}\``)
+        .join(',')}]`;
+    },
+  );
+
+  return { content: nextContent, found, patched, alreadyCorrect };
+}
+// end patchTrustedBrowserClientHashesInContent
+
 function patchTrustedBrowserClientHashes(filePaths, chromeBrowserClientHash) {
   const patchedFiles = [];
   let alreadyCorrect = false;
-  const trustedHashesRe =
-    /var ([A-Za-z_$][\w$]*)=\[((?:`[a-f0-9]{64}`)(?:,`[a-f0-9]{64}`)*)\]/;
 
   for (const filePath of filePaths) {
-    let content = fs.readFileSync(filePath, 'utf8');
-    const match = content.match(trustedHashesRe);
-    if (!match) continue;
-
-    const hashes = new Set(Array.from(match[2].matchAll(/`([a-f0-9]{64})`/g), item => item[1]));
-    if (hashes.has(chromeBrowserClientHash)) {
-      alreadyCorrect = true;
-      continue;
-    }
-
-    content = content.replace(
-      match[0],
-      `var ${match[1]}=[${Array.from(hashes).map(hash => `\`${hash}\``).join(',')},\`${chromeBrowserClientHash}\`]`,
+    const content = fs.readFileSync(filePath, 'utf8');
+    const result = patchTrustedBrowserClientHashesInContent(
+      content,
+      chromeBrowserClientHash,
     );
-    fs.writeFileSync(filePath, content, 'utf8');
-    patchedFiles.push(filePath);
+    alreadyCorrect ||= result.alreadyCorrect;
+    if (result.patched) {
+      fs.writeFileSync(filePath, result.content, 'utf8');
+      patchedFiles.push(filePath);
+    }
   }
 
   return { patchedFiles, alreadyCorrect };
@@ -1575,6 +1609,13 @@ try {
     'case`open-extension-settings`:case`open-keyboard-shortcuts`:' +
     'case`open-config-toml`:case`show-settings`:case`install-wsl`:' +
     'throw Error(`"${n.type}" is not implemented in Electron.`)';
+  // V5: open-config-toml has its own upstream implementation; message=t,
+  // webContents=e, electron=c (seen in builds >= 26.715.x).
+  const NOT_IMPLEMENTED_NEEDLE_V5 =
+    'case`navigate-in-new-editor-tab`:case`open-vscode-command`:' +
+    'case`open-extension-settings`:case`open-keyboard-shortcuts`:' +
+    'case`show-settings`:case`install-wsl`:' +
+    'throw Error(`"${t.type}" is not implemented in Electron.`)';
 
   // Helper: reload the renderer at a given settings route.
   const NAV_HELPER =
@@ -1692,6 +1733,28 @@ try {
     'case`navigate-in-new-editor-tab`:case`open-vscode-command`:' +
     'case`install-wsl`:' +
     'throw Error(`"${n.type}" is not implemented in Electron.`)';
+  const SETTINGS_REPLACEMENT_V5 =
+    'case`show-settings`:{' +
+      'let _win=c.BrowserWindow.fromWebContents(e);' +
+      'if(_win){let _url=new URL(_win.getURL());' +
+      buildSettingsRouteStatement('_url', 't') +
+      '_win.loadURL(_url.toString())}' +
+      'break}' +
+    'case`open-extension-settings`:{' +
+      'let _win=c.BrowserWindow.fromWebContents(e);' +
+      'if(_win){let _url=new URL(_win.getURL());' +
+      '_url.searchParams.set("initialRoute","/settings/general-settings");' +
+      '_win.loadURL(_url.toString())}' +
+      'break}' +
+    'case`open-keyboard-shortcuts`:{' +
+      'let _win=c.BrowserWindow.fromWebContents(e);' +
+      'if(_win){let _url=new URL(_win.getURL());' +
+      '_url.searchParams.set("initialRoute","/settings/general-settings");' +
+      '_win.loadURL(_url.toString())}' +
+      'break}' +
+    'case`navigate-in-new-editor-tab`:case`open-vscode-command`:' +
+    'case`install-wsl`:' +
+    'throw Error(`"${t.type}" is not implemented in Electron.`)';
   const AUTOMATION_CWD_NORMALIZER_INLINE =
     'e=>typeof e==`string`&&e.startsWith(`\\\\\\\\?\\\\`)&&/^[A-Za-z]:/.test(e.slice(4))?e.slice(4):e';
   const AUTOMATION_RUNTIME_CWD_RE =
@@ -2309,6 +2372,8 @@ try {
     /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{modelProviders:([A-Za-z_$][\w$]*),archived:([A-Za-z_$][\w$]*)=!1,sourceKinds:([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),useStateDbOnly:([A-Za-z_$][\w$]*)=!1\}\)\{let ([A-Za-z_$][\w$]*)=\[\],([A-Za-z_$][\w$]*)=async ([A-Za-z_$][\w$]*)=>\{let ([A-Za-z_$][\w$]*)=\{limit:200,cursor:\10,sortKey:\2\.recentConversationsSortKey,modelProviders:\3,sourceKinds:\5,archived:\4,useStateDbOnly:\7\},([A-Za-z_$][\w$]*);try\{\12=await \2\.sendRequest\(`thread\/list`,\11\)\}catch\(_codexOfflineArchiveListError\)\{if\(\4\)return;throw _codexOfflineArchiveListError\}\8\.push\(\.\.\.\(\12\.data\?\?\[\]\)\),\12\.nextCursor&&await \9\(\12\.nextCursor\)\};return await \9\(null\),\8\}\/\*codex-offline:archived-threads-partial-list\*\//;
   const ARCHIVED_THREADS_LIST_ALL_CURRENT_RE =
     /function (?<functionName>[A-Za-z_$][\w$]*)\((?<requestClient>[A-Za-z_$][\w$]*),\{modelProviders:(?<modelProviders>[A-Za-z_$][\w$]*),archived:(?<archived>[A-Za-z_$][\w$]*)=!1,sourceKinds:(?<sourceKinds>[A-Za-z_$][\w$]*)=(?<defaultSourceKinds>[A-Za-z_$][\w$]*),useStateDbOnly:(?<useStateDbOnly>[A-Za-z_$][\w$]*)=!1\}\)\{let (?<threads>[A-Za-z_$][\w$]*)=\[\],(?<loadPage>[A-Za-z_$][\w$]*)=async (?<cursor>[A-Za-z_$][\w$]*)=>\{let (?<query>[A-Za-z_$][\w$]*)=\{limit:100,cursor:\k<cursor>,sortKey:\k<requestClient>\.recentConversationsSortKey,modelProviders:\k<modelProviders>,sourceKinds:\k<sourceKinds>,archived:\k<archived>,useStateDbOnly:\k<useStateDbOnly>\},(?<page>[A-Za-z_$][\w$]*)=await \k<requestClient>\.sendRequest\(`thread\/list`,\k<query>,\{priority:`background`,source:`thread_list`\}\);\k<threads>\.push\(\.\.\.\k<page>\.data\),\k<page>\.nextCursor&&await \k<loadPage>\(\k<page>\.nextCursor\)\};return await \k<loadPage>\(null\),\k<threads>\}/;
+  const ARCHIVED_THREADS_LIST_ALL_CURRENT_V2_RE =
+    /async function (?<functionName>[A-Za-z_$][\w$]*)\((?<requestClient>[A-Za-z_$][\w$]*),\{modelProviders:(?<modelProviders>[A-Za-z_$][\w$]*),archived:(?<archived>[A-Za-z_$][\w$]*)=!1,sourceKinds:(?<sourceKinds>[A-Za-z_$][\w$]*)=(?<defaultSourceKinds>[A-Za-z_$][\w$]*)\}\)\{let (?<threads>[A-Za-z_$][\w$]*)=\[\],(?<loadPage>[A-Za-z_$][\w$]*)=async (?<cursor>[A-Za-z_$][\w$]*)=>\{let (?<query>[A-Za-z_$][\w$]*)=\{limit:100,cursor:\k<cursor>,sortKey:\k<requestClient>\.recentConversationsSortKey,modelProviders:\k<modelProviders>,sourceKinds:\k<sourceKinds>,archived:\k<archived>,useStateDbOnly:!0\},(?<page>[A-Za-z_$][\w$]*)=await \k<requestClient>\.sendRequest\(`thread\/list`,\k<query>,\{priority:`background`,source:`thread_list`\}\);\k<threads>\.push\(\.\.\.\k<page>\.data\),\k<page>\.nextCursor&&await \k<loadPage>\(\k<page>\.nextCursor\)\};return await \k<loadPage>\(null\),\k<threads>\}/;
   function archivedThreadsReturnExpression(archived, failed, threads) {
     return `${archived}?(${failed}&&${threads}.length===0?` +
       `(globalThis.__codexOfflineArchivedThreadsCache??${threads}):` +
@@ -2494,6 +2559,42 @@ try {
         },
       );
     }
+    if (next === content) {
+      next = content.replace(
+        ARCHIVED_THREADS_LIST_ALL_CURRENT_V2_RE,
+        (...replacementArgs) => {
+          const {
+            functionName,
+            requestClient,
+            modelProviders,
+            archived,
+            sourceKinds,
+            defaultSourceKinds,
+            threads,
+            loadPage,
+            cursor,
+            query,
+            page,
+          } = replacementArgs.at(-1);
+          const failed = '_codexOfflineArchiveListFailed';
+          return (
+            `async function ${functionName}(${requestClient},{modelProviders:${modelProviders},` +
+            `archived:${archived}=!1,sourceKinds:${sourceKinds}=${defaultSourceKinds}}){` +
+            `let ${threads}=[],${failed}=!1,${loadPage}=async ${cursor}=>{let ${query}={` +
+            `limit:100,cursor:${cursor},sortKey:${requestClient}.recentConversationsSortKey,` +
+            `modelProviders:${modelProviders},sourceKinds:${sourceKinds},archived:${archived},` +
+            `useStateDbOnly:!0},${page};try{${page}=await ${requestClient}.sendRequest(` +
+            `\`thread/list\`,${query},{priority:\`background\`,source:\`thread_list\`})` +
+            `}catch(_codexOfflineArchiveListError){if(${archived}){${failed}=!0;return}` +
+            `throw _codexOfflineArchiveListError}${threads}.push(...(${page}.data??[])),` +
+            `${page}.nextCursor&&await ${loadPage}(${page}.nextCursor)};return await ` +
+            `${loadPage}(null),${archivedThreadsReturnExpression(archived, failed, threads)}}` +
+            ARCHIVED_THREADS_PARTIAL_LIST_PATCH_MARKER +
+            ARCHIVED_THREADS_CACHE_FALLBACK_PATCH_MARKER
+          );
+        },
+      );
+    }
     return { content: next, alreadyCorrect: false, patched: next !== content };
   }
   // The archived settings panel (Settings → Data controls → Archived) combines
@@ -2636,6 +2737,13 @@ try {
       content = content.replace(
         NOT_IMPLEMENTED_NEEDLE_V4,
         SETTINGS_REPLACEMENT_V4,
+      );
+      modified = true;
+      settingsPatchedFiles.push(path.relative(tmpDir, filePath));
+    } else if (content.includes(NOT_IMPLEMENTED_NEEDLE_V5)) {
+      content = content.replace(
+        NOT_IMPLEMENTED_NEEDLE_V5,
+        SETTINGS_REPLACEMENT_V5,
       );
       modified = true;
       settingsPatchedFiles.push(path.relative(tmpDir, filePath));

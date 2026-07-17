@@ -4,7 +4,9 @@ param(
     [string]$Destination = 'build/source-app',
     [string]$PackageFamilyName = 'OpenAI.Codex_2p2nqsd0c76g0',
     [string]$DownloadedFileName = '',
-    [string]$ExpectedSha1 = ''
+    [string]$ExpectedSha1 = '',
+    [string]$ExpectedSha256 = '',
+    [string]$SourceMode = 'github_release'
 )
 
 Set-StrictMode -Version Latest
@@ -105,6 +107,12 @@ try {
             throw "Downloaded package SHA1 mismatch. Expected $ExpectedSha1 but got $actualSha1"
         }
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+        $actualSha256 = (Get-FileHash -Path $downloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualSha256 -ne $ExpectedSha256.ToLowerInvariant()) {
+            throw "Downloaded package SHA256 mismatch. Expected $ExpectedSha256 but got $actualSha256"
+        }
+    }
 
     $downloadExtension = [System.IO.Path]::GetExtension($downloadPath).ToLowerInvariant()
     $packageArchivePath = $downloadPath
@@ -152,10 +160,11 @@ try {
         exportedAt = (Get-Date).ToString('o')
         exportedAppPath = 'app'
         manifestPath = 'metadata/AppxManifest.xml'
-        sourceMode = 'rg_adguard'
+        sourceMode = $SourceMode
         sourceBundleUrl = $BundleUrl
         sourceFileName = $downloadName
         sourceSha1 = if ([string]::IsNullOrWhiteSpace($ExpectedSha1)) { $null } else { $ExpectedSha1.ToLowerInvariant() }
+        sourceSha256 = if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) { $null } else { $ExpectedSha256.ToLowerInvariant() }
     }
 
     $metadata | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $metadataPath 'package-metadata.json') -Encoding UTF8

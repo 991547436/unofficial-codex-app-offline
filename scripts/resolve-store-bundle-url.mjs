@@ -1,26 +1,25 @@
+import path from 'node:path';
 import process from 'node:process';
-import { chromium } from 'playwright';
+import { pathToFileURL } from 'node:url';
+
+const DEFAULT_REPOSITORY = 'Wangnov/codex-app-mirror';
+const DEFAULT_ASSET_PATTERN = 'OpenAI.Codex_*_x64*.Msix';
 
 function parseArgs(argv) {
   const args = {};
 
   for (let index = 0; index < argv.length; index += 1) {
     const current = argv[index];
-
-    if (!current.startsWith('--')) {
-      continue;
-    }
+    if (!current.startsWith('--')) continue;
 
     const key = current.slice(2);
     const next = argv[index + 1];
-
     if (next && !next.startsWith('--')) {
       args[key] = next;
       index += 1;
-      continue;
+    } else {
+      args[key] = 'true';
     }
-
-    args[key] = 'true';
   }
 
   return args;
@@ -30,231 +29,169 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function decodeHtml(value) {
-  return value
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
-    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)));
+export function globToRegExp(pattern) {
+  const source = pattern
+    .split('*')
+    .map(part => part.split('?').map(escapeRegExp).join('.'))
+    .join('.*');
+  return new RegExp(`^${source}$`, 'i');
 }
 
-function textFromHtml(value) {
-  return decodeHtml(value.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+export function packageVersionFromFileName(fileName) {
+  return fileName.match(/^OpenAI\.Codex_(\d+(?:\.\d+)+)_/i)?.[1] ?? null;
 }
 
-function parseLinksFromHtml(html, { filePattern, packageName }) {
-  const links = [];
-  const rowPattern = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
+function sha256FromDigest(digest) {
+  const match = typeof digest === 'string'
+    ? digest.match(/^sha256:([a-f0-9]{64})$/i)
+    : null;
+  return match?.[1].toLowerCase() ?? null;
+}
 
-  while ((rowMatch = rowPattern.exec(html)) !== null) {
-    const cellPattern = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
-    const cells = [];
-    let cellMatch;
+function normalizeAsset(asset) {
+  return {
+    fileName: asset.name,
+    href: asset.browser_download_url,
+    expiresAt: null,
+    sha1: null,
+    sha256: sha256FromDigest(asset.digest),
+    digest: asset.digest ?? null,
+    size: asset.size ?? null,
+    createdAt: asset.created_at ?? null,
+    updatedAt: asset.updated_at ?? null,
+  };
+}
 
-    while ((cellMatch = cellPattern.exec(rowMatch[1])) !== null) {
-      cells.push(cellMatch[1]);
+export function selectReleaseAsset(releases, assetPattern = DEFAULT_ASSET_PATTERN) {
+  const assetRegex = globToRegExp(assetPattern);
+
+  for (const release of releases) {
+    if (release.draft || release.prerelease) continue;
+
+    const candidates = (release.assets ?? [])
+      .filter(asset => assetRegex.test(asset.name ?? ''))
+      .sort((left, right) =>
+        String(right.updated_at ?? right.created_at ?? '').localeCompare(
+          String(left.updated_at ?? left.created_at ?? ''),
+        ) || String(left.name).localeCompare(String(right.name)));
+    if (candidates.length === 0) continue;
+
+    const selected = normalizeAsset(candidates[0]);
+    if (!selected.sha256) {
+      throw new Error(
+        `GitHub asset ${selected.fileName} does not provide a SHA-256 digest.`,
+      );
     }
 
-    const anchorMatch = cells[0]?.match(/<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/i);
-    if (!anchorMatch) {
-      continue;
+    const version = packageVersionFromFileName(selected.fileName);
+    if (!version) {
+      throw new Error(`Could not parse MSIX package version from ${selected.fileName}.`);
     }
 
-    const entry = {
-      fileName: textFromHtml(anchorMatch[3]),
-      href: decodeHtml(anchorMatch[2]),
-      expiresAt: cells[1] ? textFromHtml(cells[1]) : null,
-      sha1: cells[2] ? textFromHtml(cells[2]) : null,
-      size: cells[3] ? textFromHtml(cells[3]) : null,
+    return {
+      release: {
+        id: release.id,
+        tagName: release.tag_name,
+        name: release.name,
+        htmlUrl: release.html_url,
+        publishedAt: release.published_at,
+      },
+      selected,
+      candidates: candidates.map(normalizeAsset),
+      version,
     };
-
-    if (filePattern.test(entry.fileName) && entry.fileName.includes(packageName)) {
-      links.push(entry);
-    }
   }
 
-  return links;
+  throw new Error(
+    `No stable GitHub release contains an asset matching ${assetPattern}.`,
+  );
 }
 
-async function postRgAdguardApi({ packageFamilyName, ring, timeoutMs }) {
+async function fetchJson(url, { timeoutMs, token }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = {
+    accept: 'application/vnd.github+json',
+    'user-agent': 'codex-offline-builder',
+    'x-github-api-version': '2022-11-28',
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
 
   try {
-    const response = await fetch('https://store.rg-adguard.net/api/GetFiles', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        referer: 'https://store.rg-adguard.net/',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36',
-      },
-      body: new URLSearchParams({
-        type: 'PackageFamilyName',
-        url: packageFamilyName,
-        ring,
-        lang: '',
-      }),
-      signal: controller.signal,
-    });
-
+    const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok) {
-      throw new Error(`rg-adguard API returned HTTP ${response.status}`);
+      const rateLimitRemaining = response.headers.get('x-ratelimit-remaining');
+      throw new Error(
+        `GitHub Releases API returned HTTP ${response.status}` +
+        (rateLimitRemaining === '0' ? ' (rate limit exhausted)' : ''),
+      );
     }
-
-    return await response.text();
-  }
-  finally {
+    return await response.json();
+  } finally {
     clearTimeout(timeout);
   }
 }
 
-function scoreCandidate(fileName) {
-  let score = 0;
-
-  if (/\.blockmap$/i.test(fileName)) {
-    return -10000;
+export async function resolveGitHubReleaseAsset({
+  repository = DEFAULT_REPOSITORY,
+  assetPattern = DEFAULT_ASSET_PATTERN,
+  packageFamilyName,
+  timeoutMs = 120000,
+  token,
+}) {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
+    throw new Error(`Invalid GitHub repository: ${repository}`);
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`Invalid resolver timeout: ${timeoutMs}`);
   }
 
-  if (/(_x64_|x64)/i.test(fileName)) {
-    score += 400;
+  const [owner, repo] = repository.split('/');
+  const releasesUrl =
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/` +
+    `${encodeURIComponent(repo)}/releases?per_page=20`;
+  const releases = await fetchJson(releasesUrl, { timeoutMs, token });
+  if (!Array.isArray(releases)) {
+    throw new Error('GitHub Releases API returned an unexpected response.');
   }
 
-  if (/\.msixbundle$/i.test(fileName) || /\.appxbundle$/i.test(fileName)) {
-    score += 250;
-  }
-
-  if (/\.msix$/i.test(fileName) || /\.appx$/i.test(fileName)) {
-    score += 200;
-  }
-
-  if (/arm64|_x86_|_arm_/i.test(fileName)) {
-    score -= 300;
-  }
-
-  if (/language|resource|scale|test|debug|symbol/i.test(fileName)) {
-    score -= 500;
-  }
-
-  return score;
+  const resolved = selectReleaseAsset(releases, assetPattern);
+  return {
+    source: 'github_release',
+    repository,
+    packageFamilyName,
+    assetPattern,
+    resolvedAt: new Date().toISOString(),
+    ...resolved,
+  };
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const packageFamilyName = args['package-family-name'] || process.env.CODEX_PACKAGE_FAMILY_NAME;
-  const ring = args.ring || process.env.CODEX_STORE_RING || 'Retail';
-  const filePattern = new RegExp(args['file-pattern'] || '\\.(msix|appx|msixbundle|appxbundle)$', 'i');
-  const timeoutMs = Number.parseInt(args.timeout || process.env.CODEX_STORE_RESOLVER_TIMEOUT || '120000', 10);
+  const timeoutMs = Number.parseInt(
+    args.timeout || process.env.CODEX_GITHUB_RESOLVER_TIMEOUT || '120000',
+    10,
+  );
+  const resolved = await resolveGitHubReleaseAsset({
+    repository:
+      args.repository || process.env.CODEX_APP_MIRROR_REPOSITORY || DEFAULT_REPOSITORY,
+    assetPattern:
+      args['asset-pattern'] || process.env.CODEX_APP_MIRROR_ASSET_PATTERN ||
+      DEFAULT_ASSET_PATTERN,
+    packageFamilyName:
+      args['package-family-name'] || process.env.CODEX_PACKAGE_FAMILY_NAME || null,
+    timeoutMs,
+    token:
+      process.env.CODEX_GITHUB_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+  });
 
-  if (!packageFamilyName) {
-    throw new Error('Missing --package-family-name');
-  }
-
-  const packageName = packageFamilyName.split('_')[0];
-  let links = [];
-  let apiError = null;
-
-  try {
-    const html = await postRgAdguardApi({ packageFamilyName, ring, timeoutMs });
-    links = parseLinksFromHtml(html, { filePattern, packageName });
-  }
-  catch (error) {
-    apiError = error;
-  }
-
-  if (links.length === 0) {
-    if (apiError) {
-      console.error(`Direct rg-adguard API lookup failed; falling back to browser flow: ${apiError.message}`);
-    }
-
-    links = await resolveWithBrowser({ packageFamilyName, ring, filePattern, packageName, timeoutMs });
-  }
-
-  if (links.length === 0) {
-    throw new Error(`Resolver returned no matching files for ${packageFamilyName}.`);
-  }
-
-  const ranked = links
-    .map((entry) => ({ ...entry, score: scoreCandidate(entry.fileName) }))
-    .sort((left, right) => right.score - left.score || left.fileName.localeCompare(right.fileName));
-
-  const selected = ranked[0];
-  const versionMatch = selected.fileName.match(/_(\d+(?:\.\d+)+)_/);
-
-  process.stdout.write(`${JSON.stringify({
-    packageFamilyName,
-    packageName,
-    ring,
-    resolvedAt: new Date().toISOString(),
-    selected,
-    candidates: ranked,
-    version: versionMatch ? versionMatch[1] : null,
-  }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(resolved, null, 2)}\n`);
 }
 
-async function resolveWithBrowser({ packageFamilyName, ring, filePattern, packageName, timeoutMs }) {
-  const browser = await chromium.launch({ headless: true });
-
-  try {
-    const page = await browser.newPage();
-
-    await page.route('**/*', async (route) => {
-      const requestUrl = route.request().url();
-
-      if (/doubleclick|googlesyndication|googleads|google-analytics|yandex|top100|mail\.ru|rambler/i.test(requestUrl)) {
-        await route.abort();
-        return;
-      }
-
-      await route.continue();
-    });
-
-    await page.goto('https://store.rg-adguard.net/', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    await page.selectOption('#type', 'PackageFamilyName');
-    await page.fill('#url', packageFamilyName);
-    await page.selectOption('#ring', ring);
-    await Promise.all([
-      page.waitForResponse((response) => response.url().includes('/api/GetFiles') && response.status() === 200, { timeout: timeoutMs }),
-      page.locator('input[type="button"][value="✔"]').click(),
-    ]);
-
-    await page.waitForTimeout(1500);
-
-    const links = await page.locator('a').evaluateAll((nodes, filter) => {
-      return nodes
-        .map((anchor) => {
-          const row = anchor.closest('tr');
-          const cells = row ? [...row.querySelectorAll('td')].map((cell) => cell.innerText.trim()) : [];
-          return {
-            fileName: anchor.textContent?.trim() || '',
-            href: anchor.href,
-            expiresAt: cells[1] || null,
-            sha1: cells[2] || null,
-            size: cells[3] || null,
-          };
-        })
-        .filter((entry) => filter.fileRegex.test(entry.fileName) && entry.fileName.includes(filter.packageName));
-    }, {
-      fileRegex: filePattern,
-      packageName,
-    });
-
-    if (links.length === 0) {
-      const bodyText = await page.locator('body').innerText();
-      throw new Error(`Resolver returned no matching files for ${packageFamilyName}. Page text: ${bodyText}`);
-    }
-
-    return links;
-  }
-  finally {
-    await browser.close();
-  }
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
+if (invokedPath === import.meta.url) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exit(1);
+  });
 }
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exit(1);
-});
